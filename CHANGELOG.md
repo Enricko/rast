@@ -11,6 +11,25 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- **AI Agent updates from its own window.** When App Center has a newer AI
+  Agent, administrators get "AI Agent x is ready · Update" under the chat
+  list; Update installs it with its progress as a bar, and the desktop opens
+  the window again on the new version, where it was and without a page
+  reload. Any Package Center app's open windows now follow an update this
+  way, from App Center too.
+- **AI Agent: What's new, once per version.** After an update each account
+  sees what changed, in a dialog over the window (`POST /api/ai/whats-new`;
+  `/api/ai/options` says the version).
+- **AI Agent settings → Quota: bars on every card, and limits per account.**
+  Accounts whose provider reports nothing show what RAST counted in the last
+  5 hours and 7 days as bars against limits set in RAST (Limits on the card
+  or in the account dialog, `PUT
+  /api/ai/providers/{id}/accounts/{account_id}/limits`, kept in settings);
+  at a limit the account rests and the next account answers. Without a limit
+  set, the bar measures against about what RAST had counted when the
+  provider last said the account was out, else beside the provider's busiest
+  account. Per-model use shows as bars too, and ChatGPT Codex plans are asked
+  for their limits as Quota opens. Ships as AI Agent 1.3.0.
 - **AI Agent: one provider, several accounts.** A provider's dialog lists
   its accounts with Add account (sign in with another plan account, or
   paste another API key). Replies take the accounts by the provider's turn

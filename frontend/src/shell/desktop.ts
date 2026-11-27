@@ -407,34 +407,41 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     return placement;
   }
 
+  /** One window as the session keeps it (null: one it does not). */
+  function captureWindow(id: string, appId: string): SavedWindow | null {
+    const placement = sessionPlacement(id);
+    const key = windowKeys.get(id);
+    if (!placement || !key) return null;
+    const rect = placement.rect;
+    const entry: SavedWindow = {
+      key,
+      appId,
+      rect:
+        rect && rect.w > 0 && rect.h > 0
+          ? { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) }
+          : null,
+      state: placement.state,
+      minimized: placement.minimized,
+    };
+    const params = windowParams.get(id);
+    if (params !== undefined) entry.params = params;
+    const view = windowViews.get(id)?.capture();
+    if (view) entry.view = view;
+    const dialogs = windowDialogs.get(id)?.capture();
+    if (dialogs) entry.dialogs = dialogs;
+    return entry;
+  }
+
   function captureSession(): SavedSession {
     const infos = new Map(wm.list().map((win) => [win.id, win]));
     const windows: SavedWindow[] = [];
     let focused: string | null = null;
     for (const id of wm.stackOrder().slice(-MAX_SESSION_WINDOWS)) {
       const info = infos.get(id);
-      const placement = sessionPlacement(id);
-      const key = windowKeys.get(id);
-      if (!info || !placement || !key) continue;
-      const rect = placement.rect;
-      const entry: SavedWindow = {
-        key,
-        appId: info.appId,
-        rect:
-          rect && rect.w > 0 && rect.h > 0
-            ? { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) }
-            : null,
-        state: placement.state,
-        minimized: placement.minimized,
-      };
-      const params = windowParams.get(id);
-      if (params !== undefined) entry.params = params;
-      const view = windowViews.get(id)?.capture();
-      if (view) entry.view = view;
-      const dialogs = windowDialogs.get(id)?.capture();
-      if (dialogs) entry.dialogs = dialogs;
+      const entry = info ? captureWindow(id, info.appId) : null;
+      if (!info || !entry) continue;
       windows.push(entry);
-      if (info.focused && !placement.minimized) focused = key;
+      if (info.focused && !entry.minimized) focused = entry.key;
     }
     const stage = stageSize();
     const session: SavedSession = {
@@ -1487,7 +1494,32 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   async function refreshPackageApps(): Promise<void> {
     const windows = await fetchPackageWindows(deps.api);
     if (disposed) return;
-    if (setPackageApps(windows.map(packageAppDefinition))) enforceEffectiveAccess();
+    const before = new Map(windows.map((w) => [w.appId, findApp(w.appId)?.packageVersion]));
+    if (!setPackageApps(windows.map(packageAppDefinition))) return;
+    enforceEffectiveAccess();
+    for (const w of windows) {
+      const was = before.get(w.appId);
+      if (was && was !== w.version) reopenWindows(w.appId);
+    }
+  }
+
+  /**
+   * An app's package changed version (updated in App Center or from the app
+   * itself): its open windows open again on the new version, where they
+   * were and with what they kept (parameters, scroll, typed text, dialogs).
+   */
+  function reopenWindows(appId: string): void {
+    for (const info of wm.list()) {
+      if (info.appId !== appId) continue;
+      const entry = captureWindow(info.id, appId);
+      if (!entry) continue;
+      wm.close(info.id);
+      openApp(appId, entry.params, { key: entry.key, placement: placementOf(entry), view: entry.view, dialogs: entry.dialogs });
+      if (info.focused) {
+        const fresh = wm.findWindow(appId);
+        if (fresh) wm.focus(fresh.id);
+      }
+    }
   }
   disposers.push(
     realtime.on("package.changed", () => {

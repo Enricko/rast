@@ -18,6 +18,7 @@ import { artifactCard, createArtifactPane } from "./artifact";
 import { createAttachments, picture, sentFiles } from "./attachments";
 import { formatEstimate } from "./usage";
 import { renderMarkdown } from "./markdown";
+import { showWhatsNew, updateBanner } from "./update";
 import {
   allowanceText,
   allowanceUsed,
@@ -156,6 +157,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   });
   const list = h("nav", { class: "ai-list", ariaLabel: "Chats" });
   const allowanceEl = h("div", { class: "ai-allowance hidden" });
+  const updater = updateBanner(ctx, realtime, isAdmin);
   const settingsButton = h(
     "button",
     { class: "btn btn-ghost ai-settings-btn", type: "button", onClick: () => openSettings() },
@@ -181,7 +183,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     newButton,
     h("label", { class: "ai-search-wrap" }, iconSvg("search", 14), search),
     list,
-    h("div", { class: "ai-side-foot" }, allowanceEl, settingsButton),
+    h("div", { class: "ai-side-foot" }, updater.el, allowanceEl, settingsButton),
   );
 
   const titleEl = h("h2", { class: "ai-title" }, "New chat");
@@ -1520,6 +1522,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
     for (const entry of bodies.values()) if (entry.frame) window.cancelAnimationFrame(entry.frame);
     allowanceRefresh.cancel();
+    updater.destroy();
     settings?.destroy();
   });
 
@@ -1529,6 +1532,8 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   void (async () => {
     await Promise.all([loadOptions(), loadList()]);
     if (disposed) return;
+    const loaded = options as Options | null;
+    showWhatsNew(ctx, loaded?.version, loaded?.whatsNewSeen);
     if (start.settings && isAdmin) openSettings();
     else if (start.conversationId) await openConversation(start.conversationId, { quiet: true, artifact: start.artifact });
     else renderThread();

@@ -31,6 +31,7 @@ use crate::{
 pub fn routes() -> Router<Agent> {
     Router::new()
         .route("/api/ai/options", get(options))
+        .route("/api/ai/whats-new", post(whats_new_seen))
         .route("/api/ai/usage", get(my_usage))
         .route(
             "/api/ai/conversations",
@@ -82,6 +83,10 @@ pub fn routes() -> Router<Agent> {
         .route(
             "/api/ai/providers/{id}/accounts/{account_id}",
             put(update_account).delete(delete_account),
+        )
+        .route(
+            "/api/ai/providers/{id}/accounts/{account_id}/limits",
+            put(put_account_limits),
         )
         .route("/api/ai/admin/quota", get(admin_quota))
         .route("/api/ai/admin/quota/refresh", post(refresh_quota))
@@ -304,13 +309,46 @@ async fn options(State(state): State<Agent>, user: AuthUser) -> AppResult<Json<V
     let configured: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_providers")
         .fetch_one(&state.db)
         .await?;
+    let seen = crate::db::get_setting(&state.db, &whats_new_key(user.id)).await;
     Ok(Json(json!({
         "isAdmin": user.is_admin(),
+        "version": ai::app::VERSION,
+        "whatsNewSeen": seen,
         "configured": configured > 0,
         "providers": providers.iter().map(ai::Provider::public_json).collect::<Vec<_>>(),
         "agents": agents,
         "allowance": ai::allowance(&state.db, user.id, &limits).await?,
     })))
+}
+
+fn whats_new_key(user_id: i64) -> String {
+    format!("ai.whats-new.{user_id}")
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WhatsNewSeen {
+    version: String,
+}
+
+/// POST /api/ai/whats-new — this account read what is new in `version`
+/// (the window shows it once per version).
+async fn whats_new_seen(
+    State(state): State<Agent>,
+    user: AuthUser,
+    Json(body): Json<WhatsNewSeen>,
+) -> AppResult<Json<Value>> {
+    let version = body.version.trim();
+    if version.is_empty()
+        || version.len() > 32
+        || !version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(AppError::bad_request("version is like 1.3.0"));
+    }
+    crate::db::set_setting(&state.db, &whats_new_key(user.id), version).await?;
+    Ok(Json(json!({ "whatsNewSeen": version })))
 }
 
 /// GET /api/ai/usage
@@ -3256,7 +3294,7 @@ async fn swap_accounts(state: &Agent, a: &ai::Provider, b: &ai::Provider) -> App
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(())
+    ai::accounts::swap_kept_limits(&state.db, &a.id, &b.id).await
 }
 
 /// PUT /api/ai/providers/{id}/accounts/{account_id} — set an account aside
@@ -3374,6 +3412,7 @@ async fn delete_account(
         .bind(&removed)
         .execute(&state.db)
         .await?;
+    ai::accounts::forget_kept_limits(&state.db, &removed).await;
     audit_admin(
         &state,
         &admin.0,
@@ -3388,6 +3427,62 @@ async fn delete_account(
     Ok(Json(
         json!({ "provider": provider_json(&state, &first).await? }),
     ))
+}
+
+/// Tokens an administrator can set as an account's limit, at most.
+const MAX_KEPT_LIMIT: i64 = 1_000_000_000_000;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountLimits {
+    /// Tokens per 5 hours (`null`: none).
+    hours5: Option<i64>,
+    /// Tokens per week (`null`: none).
+    week: Option<i64>,
+}
+
+/// PUT /api/ai/providers/{id}/accounts/{account_id}/limits — the tokens per
+/// 5 hours and per week RAST lets the account use (it rests at a limit and
+/// the next account answers); `null` clears one.
+async fn put_account_limits(
+    State(state): State<Agent>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Path((id, account_id)): Path<(String, String)>,
+    Json(body): Json<AccountLimits>,
+) -> AppResult<Json<Value>> {
+    let first = first_account(&state, &id).await?;
+    let accounts = ai::accounts::of(&state.db, &first).await?;
+    if !accounts.iter().any(|a| a.id == account_id) {
+        return Err(AppError::NotFound("account not found"));
+    }
+    for limit in [body.hours5, body.week].into_iter().flatten() {
+        if !(1..=MAX_KEPT_LIMIT).contains(&limit) {
+            return Err(AppError::bad_request(format!(
+                "a limit goes from 1 to {MAX_KEPT_LIMIT} tokens"
+            )));
+        }
+    }
+    ai::accounts::set_kept_limits(&state.db, &account_id, body.hours5, body.week).await?;
+    // A lower limit can already be reached.
+    ai::accounts::keep_limits(&state.db, &account_id, now_ms()).await;
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.provider.account_limits",
+        "ai_provider",
+        &account_id,
+        &first.name,
+    )
+    .await;
+    config_changed(&state, "providers");
+    let kept = ai::accounts::kept_limits(&state.db)
+        .await
+        .get(&account_id)
+        .copied()
+        .unwrap_or_default();
+    Ok(Json(json!({ "limits": kept })))
 }
 
 /// GET /api/ai/admin/quota — every account's limits as its provider last
@@ -3414,7 +3509,8 @@ async fn quota_overview(
         "SELECT account_id, model,
              SUM(created_at >= ?1), SUM(CASE WHEN created_at >= ?1 THEN input_tokens + output_tokens ELSE 0 END),
              SUM(created_at >= ?2), SUM(CASE WHEN created_at >= ?2 THEN input_tokens + output_tokens ELSE 0 END),
-             COUNT(*), SUM(input_tokens + output_tokens)
+             COUNT(*), SUM(input_tokens + output_tokens),
+             MIN(CASE WHEN created_at >= ?1 THEN created_at END), MIN(created_at)
          FROM ai_usage WHERE created_at >= ?3 AND account_id IS NOT NULL
          GROUP BY account_id, model",
     )
@@ -3428,6 +3524,8 @@ async fn quota_overview(
     struct Counts {
         totals: [i64; 6],
         models: Vec<(String, [i64; 6])>,
+        /// The oldest reply in the 5 hours and in the 7 days (0: none).
+        oldest: [i64; 2],
     }
     let mut counted: std::collections::HashMap<String, Counts> = std::collections::HashMap::new();
     for row in &rows {
@@ -3441,8 +3539,16 @@ async fn quota_overview(
         for (total, value) in entry.totals.iter_mut().zip(values) {
             *total += value;
         }
+        for (i, oldest) in entry.oldest.iter_mut().enumerate() {
+            if let Ok(Some(at)) = row.try_get::<Option<i64>, _>(i + 8) {
+                if *oldest == 0 || at < *oldest {
+                    *oldest = at;
+                }
+            }
+        }
         entry.models.push((model, values));
     }
+    let kept = ai::accounts::kept_limits(&state.db).await;
     let window = |v: &[i64; 6], at: usize| json!({"calls": v[at], "tokens": v[at + 1]});
     let mut providers = Vec::new();
     for provider in ai::providers(&state.db).await? {
@@ -3458,6 +3564,17 @@ async fn quota_overview(
                     "day": window(&totals, 2),
                     "week": window(&totals, 4),
                 });
+                let oldest = counts.map(|c| c.oldest).unwrap_or_default();
+                for (key, at, length) in [
+                    ("hours5", oldest[0], ai::accounts::HOURS5_MS),
+                    ("week", oldest[1], ai::accounts::WEEK_MS),
+                ] {
+                    if at > 0 {
+                        // The oldest reply in the window leaves it then.
+                        json["counted"][key]["leavesAt"] = json!(at + length);
+                    }
+                }
+                json["limits"] = json!(kept.get(&a.id).copied().unwrap_or_default());
                 let mut models: Vec<&(String, [i64; 6])> = counts
                     .map(|c| c.models.iter().collect())
                     .unwrap_or_default();

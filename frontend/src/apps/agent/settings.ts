@@ -37,9 +37,13 @@ import {
   type QuotaWindow,
   type Rotation,
   accountState,
+  countedBars,
   leftTone,
+  parseTokens,
   resetIn,
   windowLeft,
+  type CountedBar,
+  type KeptLimits,
   type Conversation,
   type LimitRule,
   type Overview,
@@ -168,7 +172,8 @@ export function mountSettings(options: {
       case "providers":
         return renderProviders(overview);
       case "quota":
-        return void renderQuota();
+        // Codex plans are asked as the page opens (once a minute at most).
+        return void renderQuota(undefined, true);
       case "agents":
         return renderAgents(overview);
       case "skills":
@@ -1160,6 +1165,12 @@ export function mountSettings(options: {
         );
       }
     }
+    buttons.push(
+      act("Limits", "gauge", () => {
+        close();
+        openLimits(provider.id, account);
+      }),
+    );
     if (index > 0) buttons.push(act("Move up", "arrowUp", () => apply({ move: "up" })));
     if (index + 1 < count) buttons.push(act("Move down", "arrowDown", () => apply({ move: "down" })));
     if (count > 1) {
@@ -1209,6 +1220,85 @@ export function mountSettings(options: {
         h("div", { class: "ai-account-actions" }, ...buttons),
       ),
       actions: [{ label: "Close", variant: "ghost", onClick: () => undefined }],
+    });
+  }
+
+  /**
+   * The tokens per 5 hours and per week RAST lets an account use: at a
+   * limit it rests and the next account answers; the quota bars measure
+   * against them.
+   */
+  async function openLimits(providerId: string, account: { id: string; label: string }, known?: KeptLimits): Promise<void> {
+    let limits = known;
+    if (!limits) {
+      try {
+        const quota = await ctx.api.get<QuotaOverview>("/api/ai/admin/quota");
+        limits = quota.providers.flatMap((p) => p.accounts).find((a) => a.id === account.id)?.limits ?? {};
+      } catch (error) {
+        ctx.toast.error(errorMessage(error));
+        return;
+      }
+    }
+    if (disposed) return;
+    const field = (label: string, value: number | undefined, seen: number | undefined) => {
+      const input = h("input", {
+        class: "input ai-limit-input",
+        type: "text",
+        inputMode: "decimal",
+        spellcheck: false,
+        placeholder: seen ? `About ${formatTokens(seen)} seen` : "No limit",
+        value: value ? formatTokens(value) : "",
+      });
+      return {
+        input,
+        el: h(
+          "label",
+          { class: "field" },
+          h("span", { class: "field-label" }, label),
+          input,
+          seen ? h("span", { class: "field-hint" }, `RAST had counted ${formatTokens(seen)} when the provider last said this account was out.`) : null,
+        ),
+      };
+    };
+    const hours5 = field("Tokens per 5 hours", limits.hours5, limits.seenHours5);
+    const week = field("Tokens per week", limits.week, limits.seenWeek);
+    const status = h("div", { class: "field-error", hidden: true });
+    modal({
+      within: ctx.root,
+      title: `Limits for ${account.label}`,
+      body: h(
+        "div",
+        { class: "ai-form" },
+        h("p", { class: "small muted" }, "RAST counts this account's tokens. At a limit it rests and the next account answers, until enough of its use is older than the window. Write amounts like 2M or 500k; leave one empty for none."),
+        hours5.el,
+        week.el,
+        status,
+      ),
+      actions: [
+        { label: "Cancel", variant: "ghost", onClick: () => undefined },
+        {
+          label: "Save",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            status.hidden = true;
+            const values = [parseTokens(hours5.input.value), parseTokens(week.input.value)];
+            if (values.some((v) => v !== null && Number.isNaN(v))) {
+              status.textContent = "Write amounts like 2000000, 2M or 500k.";
+              status.hidden = false;
+              return;
+            }
+            try {
+              await ctx.api.put(`/api/ai/providers/${providerId}/accounts/${account.id}/limits`, { hours5: values[0], week: values[1] });
+            } catch (error) {
+              formError(status, error);
+            }
+            close();
+            ctx.toast.success(`Limits saved for ${account.label}`);
+            if (page === "quota") void renderQuota();
+          },
+        },
+      ],
     });
   }
 
@@ -1266,6 +1356,56 @@ export function mountSettings(options: {
       h("span", { class: "ai-quota-bar", role: "meter", ariaLabel: `${w.name}: ${left === null ? "unknown" : `${Math.round(left)}% left`}` }, fill),
       h("span", { class: "ai-quota-used small muted" }, counts),
       h("span", { class: "ai-quota-reset small muted" }, reset),
+    );
+  }
+
+  /** What RAST counted in a window, as a bar against the account's limit. */
+  function countedRow(bar: CountedBar, now: number, setLimit: () => void): HTMLElement {
+    const fill = h("span", { class: "ai-quota-fill" });
+    fill.style.width = `${bar.fill}%`;
+    const about = bar.source === "seen" ? "about " : "";
+    const leaves = bar.leavesAt && bar.leavesAt > now ? `Frees up ${resetIn(bar.leavesAt - now)}` : "";
+    const tone = bar.left === null ? "counted" : leftTone(bar.left) || "none";
+    const label = bar.left === null ? `${bar.name}: ${formatTokens(bar.used)} tokens used, no limit set` : `${bar.name}: ${Math.round(bar.left)}% left`;
+    return h(
+      "div",
+      {
+        class: `ai-quota-row is-${tone}`,
+        title: bar.source === "seen" ? "The limit is about what RAST had counted when the provider last said this account was out." : "",
+      },
+      h("span", { class: "ai-quota-name" }, bar.name),
+      bar.left === null
+        ? h("button", { class: "ai-quota-set small", type: "button", onClick: setLimit }, "Set limit")
+        : h("span", { class: "ai-quota-left small" }, `${Math.round(bar.left)}% left`),
+      h("span", { class: "ai-quota-bar", role: "meter", ariaLabel: label }, fill),
+      h("span", { class: "ai-quota-used small muted" }, bar.limit ? `${formatTokens(bar.used)} / ${about}${formatTokens(bar.limit)}` : `${formatTokens(bar.used)} tokens used`),
+      h("span", { class: "ai-quota-reset small muted" }, leaves),
+    );
+  }
+
+  /** What RAST counted per model: bars beside the account's busiest model. */
+  function modelBars(account: QuotaAccount): HTMLElement {
+    const shown = account.models.slice(0, 5);
+    const top = Math.max(1, ...shown.map((m) => m.week.tokens));
+    return h(
+      "div",
+      { class: "ai-quota-models" },
+      h("span", { class: "ai-quota-models-head small muted" }, "By model · 5 hours / 7 days"),
+      ...shown.map((m) => {
+        const fill = h("span", { class: "ai-quota-fill" });
+        fill.style.width = `${Math.min(100, (m.week.tokens * 100) / top)}%`;
+        return h(
+          "div",
+          { class: "ai-quota-model small" },
+          h("span", { class: "ai-quota-model-name", title: m.model }, m.model),
+          h(
+            "span",
+            { class: "ai-quota-model-count muted", title: `${m.hours5.calls} call${m.hours5.calls === 1 ? "" : "s"} in 5 hours, ${m.week.calls} in 7 days` },
+            `${formatTokens(m.hours5.tokens)} / ${formatTokens(m.week.tokens)}`,
+          ),
+          h("span", { class: "ai-quota-bar is-thin", role: "meter", ariaLabel: `${m.model}: ${formatTokens(m.week.tokens)} tokens in 7 days` }, fill),
+        );
+      }),
     );
   }
 
@@ -1422,6 +1562,7 @@ export function mountSettings(options: {
               .catch((error) => ctx.toast.error(errorMessage(error))),
           )
         : null,
+      icon("Limits", "gauge", () => void openLimits(provider.id, account, account.limits ?? {})),
       icon("Edit", "edit", edit),
       count > 1 ? icon("Remove", "trash", () => void removeAccount(provider, account).then((next) => next && void renderQuota()), true) : null,
       toggle.el,
@@ -1441,26 +1582,16 @@ export function mountSettings(options: {
           )
         : null,
     );
-    // What RAST counted per model (the last 5 hours), when the provider
-    // reports no limits of its own.
-    const models = windows.length
+    // Without limits from the provider: what RAST counted, against the
+    // limits kept in RAST, and per model.
+    const counted = windows.length
       ? null
-      : account.models.length
-        ? h(
-            "div",
-            { class: "ai-quota-models" },
-            h("span", { class: "ai-quota-models-head small muted" }, h("span", {}, "Model"), h("span", {}, "5 h"), h("span", {}, "7 days")),
-            ...account.models.slice(0, 5).map((m) =>
-              h(
-                "div",
-                { class: "ai-quota-model small" },
-                h("span", { class: "ai-quota-model-name", title: m.model }, m.model),
-                h("span", { title: `${m.hours5.calls} call${m.hours5.calls === 1 ? "" : "s"}` }, formatTokens(m.hours5.tokens)),
-                h("span", { class: "muted", title: `${m.week.calls} call${m.week.calls === 1 ? "" : "s"}` }, formatTokens(m.week.tokens)),
-              ),
-            ),
-          )
-        : h("p", { class: "ai-quota-quiet small muted" }, "Unused in the last 7 days");
+      : h(
+          "div",
+          { class: "ai-quota-rows" },
+          ...countedBars(account, provider.accounts).map((bar) => countedRow(bar, now, () => void openLimits(provider.id, account, account.limits ?? {}))),
+        );
+    const models = windows.length ? null : account.models.length ? modelBars(account) : h("p", { class: "ai-quota-quiet small muted" }, "Unused in the last 7 days");
     const totals = account.counted;
     const foot = h(
       "div",
@@ -1493,7 +1624,7 @@ export function mountSettings(options: {
         tools,
       ),
       status,
-      windows.length ? h("div", { class: "ai-quota-rows" }, ...windows.map((w) => quotaRow(w, now))) : null,
+      windows.length ? h("div", { class: "ai-quota-rows" }, ...windows.map((w) => quotaRow(w, now))) : counted,
       models,
       foot,
     );

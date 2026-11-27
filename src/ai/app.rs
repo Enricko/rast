@@ -470,6 +470,15 @@ pub async fn forget_all_but(
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_window_says_what_is_new_in_this_version() {
+        let notes = include_str!("../../frontend/src/apps/agent/whats-new.ts");
+        assert!(
+            notes.contains(&format!("version: \"{VERSION}\"")),
+            "add AI Agent {VERSION} to frontend/src/apps/agent/whats-new.ts"
+        );
+    }
+
     #[tokio::test]
     async fn removed_accounts_are_forgotten() {
         let dir = tempfile::tempdir().unwrap();

@@ -299,6 +299,9 @@ pub async fn rest(pool: &SqlitePool, id: &str, limit: &Limit, now: i64) -> i64 {
     if let Err(e) = stored {
         tracing::warn!(error = %e, "could not mark an AI account as resting");
     }
+    if limit.until.is_some() {
+        note_seen(pool, id, until, now).await;
+    }
     until
 }
 
@@ -324,6 +327,197 @@ pub async fn store_quota(pool: &SqlitePool, id: &str, quota: &Quota) {
         .await;
     if let Err(e) = stored {
         tracing::warn!(error = %e, "could not store an AI account's limits");
+    }
+}
+
+// ------------------------------------------------- limits RAST keeps
+
+/// The 5-hour window, in ms.
+pub const HOURS5_MS: i64 = 5 * 3_600_000;
+/// The weekly window, in ms.
+pub const WEEK_MS: i64 = 7 * 86_400_000;
+/// Token limits per account that RAST keeps itself, as JSON
+/// `{account id: KeptLimits}` (settings, so both databases keep it without
+/// a schema change).
+const SETTING_KEPT: &str = "ai.account-limits";
+/// A provider's rest at least this long counts as one of its plan limits
+/// (shorter ones are rate limits per minute).
+const SEEN_AFTER_MS: i64 = 15 * 60_000;
+/// One writer of [`SETTING_KEPT`] at a time.
+static KEPT_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// An account's tokens per 5 hours and per week: the limits an
+/// administrator set (RAST rests the account when it reaches one), and what
+/// RAST had counted when the provider last said the account was out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours5: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_hours5: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_week: Option<i64>,
+}
+
+impl KeptLimits {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Every account's kept limits.
+pub async fn kept_limits(pool: &SqlitePool) -> HashMap<String, KeptLimits> {
+    crate::db::get_setting(pool, SETTING_KEPT)
+        .await
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Change one account's kept limits.
+async fn change_kept(
+    pool: &SqlitePool,
+    id: &str,
+    change: impl FnOnce(&mut KeptLimits),
+) -> AppResult<()> {
+    let _one = KEPT_LOCK.lock().await;
+    let mut all = kept_limits(pool).await;
+    let entry = all.entry(id.to_string()).or_default();
+    change(entry);
+    if entry.is_empty() {
+        all.remove(id);
+    }
+    let text = serde_json::to_string(&all).unwrap_or_else(|_| "{}".into());
+    crate::db::set_setting(pool, SETTING_KEPT, &text).await
+}
+
+/// Set (or clear, with `None`) the limits RAST keeps for an account.
+pub async fn set_kept_limits(
+    pool: &SqlitePool,
+    id: &str,
+    hours5: Option<i64>,
+    week: Option<i64>,
+) -> AppResult<()> {
+    change_kept(pool, id, |kept| {
+        kept.hours5 = hours5.filter(|&t| t > 0);
+        kept.week = week.filter(|&t| t > 0);
+    })
+    .await
+}
+
+/// Two accounts traded credentials (and their use): their limits go along.
+pub async fn swap_kept_limits(pool: &SqlitePool, a: &str, b: &str) -> AppResult<()> {
+    let _one = KEPT_LOCK.lock().await;
+    let mut all = kept_limits(pool).await;
+    let (ka, kb) = (all.remove(a), all.remove(b));
+    if let Some(k) = kb {
+        all.insert(a.to_string(), k);
+    }
+    if let Some(k) = ka {
+        all.insert(b.to_string(), k);
+    }
+    let text = serde_json::to_string(&all).unwrap_or_else(|_| "{}".into());
+    crate::db::set_setting(pool, SETTING_KEPT, &text).await
+}
+
+/// Forget a removed account's limits.
+pub async fn forget_kept_limits(pool: &SqlitePool, id: &str) {
+    if let Err(e) = change_kept(pool, id, |kept| *kept = KeptLimits::default()).await {
+        tracing::warn!(error = %e, "could not forget an AI account's limits");
+    }
+}
+
+/// Tokens of each reply on the account since `since`, oldest first.
+async fn used_since(pool: &SqlitePool, id: &str, since: i64) -> Vec<(i64, i64)> {
+    sqlx::query_as::<_, (i64, i64)>(
+        "SELECT created_at, input_tokens + output_tokens FROM ai_usage
+         WHERE account_id = ? AND created_at >= ? ORDER BY created_at",
+    )
+    .bind(id)
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// When the use in a rolling window drops below `limit` again: as the
+/// oldest replies leave it. `None` while it is below.
+pub fn frees_at(used: &[(i64, i64)], limit: i64, window: i64) -> Option<i64> {
+    let mut total: i64 = used.iter().map(|u| u.1).sum();
+    if limit <= 0 || total < limit {
+        return None;
+    }
+    for (at, tokens) in used {
+        total -= tokens;
+        if total < limit {
+            return Some(at + window);
+        }
+    }
+    used.last().map(|u| u.0 + window)
+}
+
+/// After a reply on the account: rest it when what RAST counted reaches a
+/// limit an administrator set, until enough of that use leaves the window.
+pub async fn keep_limits(pool: &SqlitePool, id: &str, now: i64) {
+    let Some(kept) = kept_limits(pool).await.get(id).copied() else {
+        return;
+    };
+    for (limit, window, words) in [
+        (kept.hours5, HOURS5_MS, "5-hour"),
+        (kept.week, WEEK_MS, "weekly"),
+    ] {
+        let Some(limit) = limit else { continue };
+        let used = used_since(pool, id, now - window).await;
+        let Some(until) = frees_at(&used, limit, window).filter(|&t| t > now) else {
+            continue;
+        };
+        // A longer rest the provider gave stays.
+        let stored = sqlx::query(
+            "UPDATE ai_providers SET resting_until = ?, resting_reason = ?
+             WHERE id = ? AND (resting_until IS NULL OR resting_until < ?)",
+        )
+        .bind(until)
+        .bind(format!("Reached the {words} limit set in RAST"))
+        .bind(id)
+        .bind(until)
+        .execute(pool)
+        .await;
+        if let Err(e) = stored {
+            tracing::warn!(error = %e, "could not rest an AI account at its limit");
+        }
+    }
+}
+
+/// The provider said the account is out until `until`: keep what RAST had
+/// counted in that window, so the quota page can show about where the
+/// limit is.
+async fn note_seen(pool: &SqlitePool, id: &str, until: i64, now: i64) {
+    let rest = until - now;
+    if rest < SEEN_AFTER_MS {
+        return;
+    }
+    let five_hours = rest <= HOURS5_MS + 10 * 60_000;
+    let window = if five_hours { HOURS5_MS } else { WEEK_MS };
+    let used: i64 = used_since(pool, id, now - window)
+        .await
+        .iter()
+        .map(|u| u.1)
+        .sum();
+    if used <= 0 {
+        return;
+    }
+    let noted = change_kept(pool, id, |kept| {
+        if five_hours {
+            kept.seen_hours5 = Some(used);
+        } else {
+            kept.seen_week = Some(used);
+        }
+    })
+    .await;
+    if let Err(e) = noted {
+        tracing::warn!(error = %e, "could not note an AI account's limit");
     }
 }
 
@@ -354,6 +548,19 @@ pub fn in_words(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kept_limit_frees_up_as_the_oldest_use_leaves() {
+        let used = [(1_000, 400), (2_000, 300), (3_000, 300)];
+        // Below the limit: nothing to wait for.
+        assert_eq!(frees_at(&used, 1_001, 10_000), None);
+        // At 1000 of 1000: back once the first 400 leaves (600 < 1000).
+        assert_eq!(frees_at(&used, 1_000, 10_000), Some(11_000));
+        // 1000 of 500: 600 after the first, 300 after the second.
+        assert_eq!(frees_at(&used, 500, 10_000), Some(12_000));
+        assert_eq!(frees_at(&used, 0, 10_000), None);
+        assert_eq!(frees_at(&[], 10, 10_000), None);
+    }
 
     fn account(id: &str, pool_id: Option<&str>) -> Provider {
         Provider {

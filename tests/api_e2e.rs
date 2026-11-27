@@ -4590,6 +4590,93 @@ async fn ai_provider_accounts_take_over_at_their_limits() {
         Value::Null
     );
 
+    // A limit RAST keeps: reaching it rests the account until enough of its
+    // use leaves the window.
+    let second = quota[1]["id"].as_str().unwrap().to_string();
+    let limits = format!("/api/ai/providers/{provider_id}/accounts/{second}/limits");
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &limits,
+            Some(json!({"hours5": 0, "week": null})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &limits,
+            Some(json!({"hours5": 10, "week": 5000})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["limits"], json!({"hours5": 10, "week": 5000}));
+    let (_, _, body) = server
+        .request("GET", "/api/ai/admin/quota", None, admin.headers())
+        .await;
+    let kept = &body["providers"][0]["accounts"][1];
+    assert_eq!(kept["limits"]["hours5"], 10, "{body}");
+    assert_eq!(
+        kept["resting"]["reason"], "Reached the 5-hour limit set in RAST",
+        "{body}"
+    );
+    let leaves = kept["counted"]["hours5"]["leavesAt"].as_i64().unwrap();
+    assert_eq!(kept["resting"]["until"].as_i64(), Some(leaves), "{body}");
+    assert!(leaves > now + 4 * 3_600_000, "{body}");
+    assert!(kept["counted"]["week"]["leavesAt"].as_i64().unwrap() > leaves);
+    // Cleared, and back now.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &limits,
+            Some(json!({"hours5": null, "week": null})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["limits"], json!({}));
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/providers/{provider_id}/accounts/{second}"),
+            Some(json!({"wake": true})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["accounts"][1]["resting"], Value::Null);
+
+    // What is new: shown once per version and account.
+    let (_, _, body) = server
+        .request("GET", "/api/ai/options", None, admin.headers())
+        .await;
+    assert_eq!(body["version"], rast::ai::app::VERSION, "{body}");
+    assert_eq!(body["whatsNewSeen"], Value::Null);
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/whats-new",
+            Some(json!({"version": "1.3.0 <b>"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/whats-new",
+            Some(json!({"version": rast::ai::app::VERSION})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, _, body) = server
+        .request("GET", "/api/ai/options", None, admin.headers())
+        .await;
+    assert_eq!(body["whatsNewSeen"], rast::ai::app::VERSION);
+
     // Round robin for every provider at once, and for the ones added later.
     let (status, _, body) = server
         .request(

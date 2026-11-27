@@ -3,9 +3,13 @@ import test from "node:test";
 
 import { agentHues } from "../src/apps/agent/marks";
 import { parseInline, parseMarkdown, safeHref } from "../src/apps/agent/markdown";
+import { compareVersions, whatsNewSince, WHATS_NEW } from "../src/apps/agent/whats-new";
 import {
   accountState,
+  countedBars,
   leftTone,
+  parseTokens,
+  type QuotaAccount,
   resetIn,
   windowLeft,
   type ProviderAccount,
@@ -404,6 +408,53 @@ test("an account's state says whether it answers", () => {
   assert.equal(accountState({ ...account, ready: false, signedIn: null }, 1000, true).label, "Sign in needed");
   assert.equal(accountState({ ...account, ready: false }, 1000, false).label, "Key needed");
   assert.deepEqual(accountState({ ...account, paused: true }, 1000, true), { label: "Set aside", tone: "off" });
+});
+
+test("accounts without reported limits get bars from what RAST counted", () => {
+  const counted = (h5: number, week: number, leavesAt?: number) => ({
+    hours5: { calls: 1, tokens: h5, ...(leavesAt ? { leavesAt } : {}) },
+    day: { calls: 1, tokens: h5 },
+    week: { calls: 1, tokens: week },
+  });
+  const base = { id: "a", label: "A", position: 0, paused: false, quota: {}, models: [], canCheck: false } as unknown as QuotaAccount;
+  const set = { ...base, counted: counted(250_000, 900_000, 5000), limits: { hours5: 1_000_000, seenWeek: 3_000_000 } } as QuotaAccount;
+  const other = { ...base, id: "b", counted: counted(500_000, 600_000) } as QuotaAccount;
+  const [h5, week] = countedBars(set, [set, other]);
+  assert.deepEqual([h5.source, h5.limit, h5.left, h5.fill, h5.leavesAt], ["set", 1_000_000, 75, 75, 5000]);
+  assert.deepEqual([week.source, week.limit, week.left], ["seen", 3_000_000, 70]);
+  // No limit: beside the busiest account, with nothing "left".
+  const [free] = countedBars(other, [set, other]);
+  assert.deepEqual([free.source, free.limit, free.left, free.fill], ["none", null, null, 100]);
+  assert.equal(countedBars({ ...other, counted: counted(0, 0) } as QuotaAccount, [other])[0].fill, 0);
+  // Over the limit: nothing left.
+  assert.equal(countedBars({ ...set, counted: counted(2_000_000, 0) } as QuotaAccount, [])[0].left, 0);
+  assert.equal(parseTokens("2M"), 2_000_000);
+  assert.equal(parseTokens(" 1.5m "), 1_500_000);
+  assert.equal(parseTokens("500k"), 500_000);
+  assert.equal(parseTokens("1,000,000"), 1_000_000);
+  assert.equal(parseTokens(""), null);
+  assert.ok(Number.isNaN(parseTokens("lots")));
+  assert.ok(Number.isNaN(parseTokens("0")));
+});
+
+test("what is new shows once, for the versions not seen yet", () => {
+  assert.equal(compareVersions("1.10.0", "1.9.2"), 1);
+  assert.equal(compareVersions("1.2", "1.2.0"), 0);
+  const releases = [
+    { version: "1.4.0", date: "", items: ["d"] },
+    { version: "1.3.0", date: "", items: ["c"] },
+    { version: "1.2.0", date: "", items: ["b"] },
+    { version: "1.1.0", date: "", items: ["a"] },
+  ];
+  const shown = (seen: string | null, current: string) => whatsNewSince(seen, current, releases).map((r) => r.version);
+  assert.deepEqual(shown("1.2.0", "1.3.0"), ["1.3.0"]);
+  assert.deepEqual(shown("1.1.0", "1.4.0"), ["1.4.0", "1.3.0", "1.2.0"]);
+  assert.deepEqual(shown(null, "1.3.0"), ["1.3.0"]);
+  assert.deepEqual(shown("1.3.0", "1.3.0"), []);
+  assert.deepEqual(shown("1.4.0", "1.3.0"), []);
+  // Every release has something to say, newest first.
+  assert.ok(WHATS_NEW.every((r) => r.items.length > 0));
+  assert.ok(WHATS_NEW.every((r, i) => i === 0 || compareVersions(WHATS_NEW[i - 1].version, r.version) > 0));
 });
 
 test("quota bars show what is left, coloured by how much", () => {

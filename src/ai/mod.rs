@@ -1349,6 +1349,9 @@ pub async fn record_usage(
     .bind(now_ms())
     .execute(pool)
     .await?;
+    if !account_id.is_empty() {
+        accounts::keep_limits(pool, account_id, now_ms()).await;
+    }
     Ok(estimate)
 }
 

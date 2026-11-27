@@ -238,6 +238,10 @@ export interface PriceListing {
 
 export interface Options {
   isAdmin: boolean;
+  /** AI Agent's version (absent from older servers). */
+  version?: string;
+  /** The version whose news this account last saw. */
+  whatsNewSeen?: string | null;
   configured: boolean;
   providers: PublicProvider[];
   agents: PublicAgent[];
@@ -409,10 +413,22 @@ export interface ProviderAccount {
 export interface Counted {
   calls: number;
   tokens: number;
+  /** When the oldest reply counted leaves the window (ms). */
+  leavesAt?: number;
+}
+
+/** Tokens per 5 hours and per week: set in RAST, or counted when the provider last said "out". */
+export interface KeptLimits {
+  hours5?: number;
+  week?: number;
+  seenHours5?: number;
+  seenWeek?: number;
 }
 
 export interface QuotaAccount extends ProviderAccount {
   counted: { hours5: Counted; day: Counted; week: Counted };
+  /** Limits RAST keeps for the account (absent from older servers). */
+  limits?: KeptLimits;
   /** What RAST counted per model (most used first). */
   models: Array<{ model: string; hours5: Counted; week: Counted }>;
   /** RAST can ask the provider for its limits now (ChatGPT's Codex plans). */
@@ -578,6 +594,59 @@ export interface Overview {
 export function windowLeft(w: QuotaWindow): number | null {
   const used = w.usedPercent ?? (w.limit ? ((w.used ?? 0) * 100) / w.limit : null);
   return used === null ? null : Math.max(0, Math.min(100, 100 - used));
+}
+
+/** A bar of what RAST counted for an account in a window. */
+export interface CountedBar {
+  key: "hours5" | "week";
+  name: string;
+  used: number;
+  /** The limit it is measured against (null: none known). */
+  limit: number | null;
+  /** Set in RAST, seen at the provider's last "out", or none. */
+  source: "set" | "seen" | "none";
+  /** Bar width, 0–100: what is left against a limit, else use beside the busiest account. */
+  fill: number;
+  /** Share left, 0–100 (null without a limit). */
+  left: number | null;
+  leavesAt?: number;
+}
+
+/**
+ * Bars for an account whose provider reports no limits: the tokens RAST
+ * counted in the last 5 hours and 7 days, against the limit set in RAST (or
+ * the use seen when the provider said the account was out); without one,
+ * beside the busiest of `peers` (its provider's accounts).
+ */
+export function countedBars(account: QuotaAccount, peers: QuotaAccount[]): CountedBar[] {
+  const kept = account.limits ?? {};
+  return (["hours5", "week"] as const).map((key) => {
+    const counted = account.counted[key];
+    const used = counted?.tokens ?? 0;
+    const set = key === "hours5" ? kept.hours5 : kept.week;
+    const seen = key === "hours5" ? kept.seenHours5 : kept.seenWeek;
+    const limit = set || seen || null;
+    const name = key === "hours5" ? "5 hours" : "7 days";
+    const leavesAt = used > 0 ? counted?.leavesAt : undefined;
+    const base = { key, name, used, limit, source: set ? "set" : seen ? "seen" : "none", ...(leavesAt ? { leavesAt } : {}) } as const;
+    if (limit) {
+      const left = Math.max(0, 100 - (used * 100) / limit);
+      return { ...base, fill: left, left };
+    }
+    const top = Math.max(0, ...peers.map((p) => p.counted[key]?.tokens ?? 0));
+    return { ...base, fill: top > 0 ? Math.min(100, (used * 100) / top) : 0, left: null };
+  });
+}
+
+/** "2M", "500k", "1.5m", "1,000,000" as tokens; null when empty, NaN when unreadable. */
+export function parseTokens(text: string): number | null {
+  const t = text.trim().toLowerCase().replace(/[,_\s]/g, "");
+  if (!t) return null;
+  const m = /^(\d+(?:\.\d+)?)([kmb]?)$/.exec(t);
+  if (!m) return Number.NaN;
+  const scale = m[2] === "k" ? 1e3 : m[2] === "m" ? 1e6 : m[2] === "b" ? 1e9 : 1;
+  const value = Math.round(Number(m[1]) * scale);
+  return value >= 1 ? value : Number.NaN;
 }
 
 /** A bar's tone by what is left: plenty, getting low, nearly out. */
