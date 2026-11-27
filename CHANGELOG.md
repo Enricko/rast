@@ -29,7 +29,7 @@ this file by `scripts/changelog-section.sh`.
   provider's dialog has 9router's Round robin switch with Sticky (replies in
   a row per account), applied at once; **Round robin for all** (Providers
   and Quota) turns it on or off for every provider and for the ones added
-  later.
+  later. Ships as AI Agent 1.2.0 with the quota tracker below.
 - **AI Agent settings → Quota, a quota tracker like 9router's**: filters by
   provider, each provider's accounts under it with its Round robin switch,
   and a card per account with Refresh (ChatGPT Codex plans are asked for
