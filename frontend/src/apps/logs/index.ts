@@ -16,6 +16,7 @@ import { endOfDay, formatDateTime, formatDateTimeSec, formatNumberCompact, forma
 import { iconSvg } from "../../core/icons";
 import { getRealtime } from "../../core/realtime";
 import type { LogEntry, Page } from "../../core/types";
+import { askAi, canAskAi } from "../../core/ask-ai";
 import { copyText, modal } from "../../core/ui";
 
 const PER_PAGE_OPTIONS = [25, 50, 100];
@@ -610,7 +611,18 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
         ),
       ),
     );
-    modal({ within: ctx.root, title: `Activity #${entry.id}`, body, wide: true });
+    let closeDetails: (() => void) | null = null;
+    if (canAskAi(ctx)) {
+      const ask = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("sparkle", 14), "Ask AI");
+      ask.addEventListener("click", () => {
+        const lines = copyTargets.map((target) => `${target.label}: ${target.value}`);
+        lines.unshift(`Timestamp: ${formatDateTimeSec(entry.createdAt)}`, `User: ${entry.username || "anonymous"}`, `Result: ${entry.result}`);
+        closeDetails?.();
+        askAi(ctx, `About this entry of my RAST server's activity log:\n${lines.join("\n")}\n\n`);
+      });
+      body.querySelector(".log-detail-actions")?.appendChild(ask);
+    }
+    closeDetails = modal({ within: ctx.root, title: `Activity #${entry.id}`, body, wide: true });
   }
 
   function applyFilterInputs(next: Filters): void {

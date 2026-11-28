@@ -110,6 +110,8 @@ export interface ShellView {
   setVisible(visible: boolean): void;
   focus(): void;
   copySelection(): Promise<void>;
+  /** The selected text, else the latest lines of output (up to the cursor). */
+  textForAi(): string;
   /** Show the shell here again (after it was opened in another window). */
   reattach(): void;
   /** Close the connection; the shell keeps running on the server. */
@@ -166,6 +168,16 @@ export function mountShell(options: ShellOptions): ShellView {
       term?.focus();
     },
     copySelection,
+    textForAi() {
+      if (!term) return "";
+      const selected = term.getSelection();
+      if (selected.trim()) return selected;
+      const buffer = term.buffer.active;
+      const last = buffer.baseY + buffer.cursorY;
+      const lines: string[] = [];
+      for (let i = Math.max(0, last - 80); i <= last; i += 1) lines.push(buffer.getLine(i)?.translateToString(true) ?? "");
+      return lines.join("\n").replace(/^\s*\n/, "").trimEnd();
+    },
     reattach() {
       if (phase !== "detached" && phase !== "failed") return;
       attempts = 0;

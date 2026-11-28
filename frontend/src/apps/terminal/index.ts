@@ -8,6 +8,7 @@
 import type { AppContext, AppDefinition, AppInstance } from "../../core/app";
 import { h } from "../../core/dom";
 import { iconSvg } from "../../core/icons";
+import { askAi, canAskAi, fenced, tailOf } from "../../core/ask-ai";
 import { confirmDialog, copyText, errorMessage } from "../../core/ui";
 import { isBusy, mountShell, parseShellList, sandboxSummary, tabLabel, type ShellInfo, type ShellView } from "./shell";
 
@@ -69,7 +70,9 @@ function mountTerminalApp(ctx: AppContext): AppInstance {
   const newButton = h("button", { class: "btn btn-ghost btn-icon btn-sm term-new", type: "button", title: "New shell", ariaLabel: "New shell" }, iconSvg("plus", 15));
   const userBadge = h("span", { class: "term-user hidden", title: "Shells run as this account on the server" });
   const copyButton = h("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", title: "Copy selection (Ctrl+Shift+C)", ariaLabel: "Copy selection" }, iconSvg("copy", 14));
-  const bar = h("div", { class: "term-bar hidden" }, tabsEl, newButton, h("div", { class: "app-toolbar-spacer" }), userBadge, copyButton);
+  const askButton = h("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", title: "Ask AI about the selection (or the latest output)", ariaLabel: "Ask AI" }, iconSvg("sparkle", 14));
+  if (!canAskAi(ctx)) askButton.classList.add("hidden");
+  const bar = h("div", { class: "term-bar hidden" }, tabsEl, newButton, h("div", { class: "app-toolbar-spacer" }), userBadge, askButton, copyButton);
   const stage = h("div", { class: "term-stage hidden" });
   const empty = h(
     "div",
@@ -83,6 +86,10 @@ function mountTerminalApp(ctx: AppContext): AppInstance {
 
   newButton.addEventListener("click", () => newShell());
   copyButton.addEventListener("click", () => void active?.view?.copySelection());
+  askButton.addEventListener("click", () => {
+    const text = active?.view?.textForAi() ?? "";
+    askAi(ctx, text ? `About this from my terminal:\n${fenced(tailOf(text, 12_000))}\n\n` : "About my terminal: ");
+  });
 
   function updateTab(tab: Tab): void {
     const view = tab.view;

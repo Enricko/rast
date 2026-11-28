@@ -7,6 +7,7 @@ import { displayFactor } from "../../core/display";
 import { clear, h } from "../../core/dom";
 import { formatBytes, formatDateTime, formatPercent, formatTime, relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
+import { askAi, canAskAi, fenced, tailOf } from "../../core/ask-ai";
 import { confirmDialog, contextMenu, copyText, errorMessage, sparkline, type ContextMenuEntry } from "../../core/ui";
 import { isAbortError, type AppLifecycle } from "../../components/lifecycle";
 import {
@@ -332,9 +333,20 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
       const text = visibleLines().map((line) => `${line.ts ? new Date(line.ts).toISOString() : ""} ${line.message}`).join("\n");
       void copyText(text).then((ok) => (ok ? ctx.toast.success("Logs copied") : ctx.toast.error("Could not copy")));
     });
+    const askButton = h("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", title: "Ask AI about these logs", ariaLabel: "Ask AI about these logs" }, iconSvg("sparkle", 14));
+    askButton.addEventListener("click", () => {
+      if (!detail) return;
+      const c = detail.container;
+      const lines = visibleLines().slice(-80).map((line) => line.message).join("\n");
+      askAi(
+        ctx,
+        `About my Docker container "${c.name}" (image ${c.image}, ${c.status || c.state}).${lines ? ` Its latest log lines:\n${fenced(tailOf(lines, 12_000))}` : ""}\n\n`,
+      );
+    });
+    if (!canAskAi(ctx)) askButton.classList.add("hidden");
     logStatus = h("span", { class: "dk-log-status muted small", role: "status" });
     logPre = h("div", { class: "dk-log", role: "log", ariaLabel: "Container logs", tabIndex: 0 });
-    body.append(h("div", { class: "dk-log-toolbar" }, search, tailSelect, followButton, copyButton, h("div", { class: "app-toolbar-spacer" }), logStatus), logPre);
+    body.append(h("div", { class: "dk-log-toolbar" }, search, tailSelect, followButton, copyButton, askButton, h("div", { class: "app-toolbar-spacer" }), logStatus), logPre);
     void pollLogs(true);
     if (follow) timers.push(lc.setInterval(() => void pollLogs(false), LOG_POLL_MS));
   }

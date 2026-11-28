@@ -9,6 +9,7 @@
 //! | GET | `/v1/users/{id}` | `{user}` (404 when gone) |
 //! | GET | `/v1/groups` | `{groups:[{id, name}]}` |
 //! | GET | `/v1/users/{id}/apps/{appId}` | `{allowed, readOnly, installed}`: may the account open that RAST app |
+//! | GET | `/v1/users/{id}/apps` | `{apps:[{id, name, description, opens}]}`: the apps the account may open now (built in and installed), in the desktop's order; `opens` as in an app window's manifest |
 //! | POST | `/v1/events` | `{kind, scope, data}` or `{events:[{kind, scope, data}, …]}` (published in order) → `{delivered}`; each `kind` starts with the app's `eventPrefix`; `scope` is `{to:"all"\|"admins"}`, `{to:"user", userId}`, `{to:"userAndAdmins", userId}` or `{to:"users", userIds}` |
 //! | POST | `/v1/audit` | `{action, userId?, username?, objectType?, objectId?, objectPath?, result?, detail?, ip?}`; `action` starts with the app's `eventPrefix` |
 //! | GET | `/v1/terminal/status` | the root helper's status, or 503 `terminal_off` |
@@ -84,6 +85,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/users", get(users))
         .route("/v1/users/{id}", get(user))
         .route("/v1/users/{id}/apps/{app_id}", get(user_app))
+        .route("/v1/users/{id}/apps", get(user_apps))
         .route("/v1/groups", get(groups))
         .route("/v1/events", post(events))
         .route("/v1/audit", post(audit_entry))
@@ -253,12 +255,9 @@ pub async fn acting_user(state: &AppState, id: i64) -> AppResult<AuthUser> {
     })
 }
 
-async fn user_app(
-    State(state): State<AppState>,
-    Path((id, app_id)): Path<(i64, String)>,
-) -> AppResult<Json<Value>> {
-    let row = load_user(&state, id).await?;
-    let user = AuthUser {
+/// The account behind a host API call (no session of its own).
+fn host_user(id: i64, row: &sqlx::sqlite::SqliteRow) -> AuthUser {
+    AuthUser {
         id,
         username: row.get("username"),
         display_name: row.get("display_name"),
@@ -266,7 +265,42 @@ async fn user_app(
         session_id: String::new(),
         quota_bytes: row.get("quota_bytes"),
         must_change_password: false,
-    };
+    }
+}
+
+async fn user_apps(State(state): State<AppState>, Path(id): Path<i64>) -> AppResult<Json<Value>> {
+    let row = load_user(&state, id).await?;
+    let user = host_user(id, &row);
+    let mut apps = Vec::new();
+    if row.get::<i64, _>("active") != 0 {
+        for app_id in access::app_ids() {
+            if !access::app_installed(&state.db, &app_id).await {
+                continue;
+            }
+            let window = state.apps.get(&app_id).map(|app| app.spec.window.clone());
+            if window.as_ref().is_some_and(|w| w.admin_only) && !user.is_admin() {
+                continue;
+            }
+            if !user.is_admin() && !access::app_access(&state.db, &user, &app_id).await?.allowed {
+                continue;
+            }
+            apps.push(json!({
+                "id": app_id,
+                "name": access::app_label(&app_id),
+                "description": access::app_description(&app_id),
+                "opens": window.map(|w| w.opens).unwrap_or_default(),
+            }));
+        }
+    }
+    Ok(Json(json!({ "apps": apps })))
+}
+
+async fn user_app(
+    State(state): State<AppState>,
+    Path((id, app_id)): Path<(i64, String)>,
+) -> AppResult<Json<Value>> {
+    let row = load_user(&state, id).await?;
+    let user = host_user(id, &row);
     let installed = access::app_installed(&state.db, &app_id).await;
     let active = row.get::<i64, _>("active") != 0;
     if !active || !installed {

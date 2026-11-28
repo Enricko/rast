@@ -19,6 +19,7 @@ import type {
   MonitorSnapshot,
   Permissions,
 } from "../../core/types";
+import { askAi, canAskAi } from "../../core/ask-ai";
 import { sparkline } from "../../core/ui";
 import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
@@ -116,6 +117,9 @@ class MonitorApp {
     this.staleBadge = h("span", { class: "badge mon-stale hidden" }, "stale");
     this.pauseButton = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("stop", 13), document.createTextNode("Pause"));
     this.pauseButton.addEventListener("click", () => this.togglePause());
+    const ask = h("button", { class: "btn btn-ghost btn-sm", type: "button", title: "Ask AI Agent about the server's load" }, iconSvg("sparkle", 13), document.createTextNode("Ask AI"));
+    ask.addEventListener("click", () => askAi(ctx, this.describeForAi()));
+    if (!canAskAi(ctx)) ask.classList.add("hidden");
     const toolbar = h(
       "div",
       { class: "app-toolbar mon-toolbar", role: "toolbar", ariaLabel: "Monitor controls" },
@@ -124,6 +128,7 @@ class MonitorApp {
       h("div", { class: "app-toolbar-spacer" }),
       this.staleBadge,
       this.ticker,
+      ask,
     );
 
     this.bannerHost = h("div", { class: "mon-banners" });
@@ -421,6 +426,31 @@ class MonitorApp {
     const interval = this.lastGood?.intervalSecs ?? 5;
     const staleAfter = Math.max(15000, interval * 3 * 1000);
     return Date.now() - this.latestReceivedAt > staleAfter;
+  }
+
+  /** The latest sample in words, for "Ask AI". */
+  private describeForAi(): string {
+    const snap = this.lastGood;
+    const lines: string[] = [];
+    if (snap?.host) {
+      const host = snap.host;
+      lines.push(
+        `CPU: ${formatPercent(host.cpuPercent, 1)} of ${host.cpuCores} core(s), load ${host.loadAvg.map((v) => v.toFixed(2)).join(" / ")}`,
+        `Memory: ${formatBytes(host.memoryUsed)} of ${formatBytes(host.memoryTotal)}; swap ${formatBytes(host.swapUsed)} of ${formatBytes(host.swapTotal)}`,
+        `Up ${formatDuration(host.uptimeSecs)}`,
+      );
+    }
+    for (const disk of snap?.disks ?? []) {
+      lines.push(`Disk ${disk.mount}: ${formatBytes(disk.usedBytes)} of ${formatBytes(disk.totalBytes)} used`);
+    }
+    if (snap?.network) {
+      lines.push(`Network: ${formatSpeed(snap.network.rxBytesPerSec)} in, ${formatSpeed(snap.network.txBytesPerSec)} out`);
+    }
+    const busy = [...(snap?.containers ?? [])].sort((a, b) => b.cpuPercent - a.cpuPercent).slice(0, 8);
+    for (const c of busy) lines.push(`Container ${c.name}: CPU ${formatPercent(c.cpuPercent, 1)}, memory ${formatBytes(c.memoryBytes)}`);
+    for (const c of snap?.components ?? []) if (c.status !== "ok") lines.push(`Component ${c.name}: ${c.status}${c.detail ? ` (${c.detail})` : ""}`);
+    const reading = lines.length ? `Resource Monitor shows now:\n${lines.map((l) => `- ${l}`).join("\n")}\n\n` : "";
+    return `About my RAST server's resources. ${reading}`;
   }
 
   private togglePause(): void {

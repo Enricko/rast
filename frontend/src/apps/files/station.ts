@@ -27,6 +27,7 @@ import {
   type ProgressHandle,
 } from "../../components/states";
 import { openPreview } from "./preview";
+import { askAi, canAskAi } from "../../core/ask-ai";
 import { pickDestination } from "./picker";
 import { UploadManager } from "./upload";
 import {
@@ -1646,6 +1647,20 @@ export class FileStation {
         label: `Open in ${app.name}`,
         icon: "external",
         onClick: () => this.ctx.openApp(app.id, { path: entry.path }),
+      });
+    }
+    if (canAskAi(this.ctx)) {
+      const paths = this.selection.size > 1 && this.selection.has(entry.path) ? [...this.selection] : [entry.path];
+      items.push({
+        label: "Ask AI",
+        icon: "sparkle",
+        onClick: () =>
+          askAi(
+            this.ctx,
+            paths.length > 1
+              ? `About these items in my files:\n${paths.map((path) => `- ${path}`).join("\n")}\n\n`
+              : `About my ${entry.kind === "dir" ? "folder" : "file"} ${entry.path}: `,
+          ),
       });
     }
     if (entry.kind === "file") {
