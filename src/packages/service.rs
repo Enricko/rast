@@ -40,6 +40,8 @@ use crate::{
 };
 
 const INSPECTION_TTL_MS: i64 = 30 * 60 * 1000;
+/// How often RAST looks whether the published catalog changed.
+const CATALOG_WATCH: Duration = Duration::from_secs(3 * 60);
 /// "Installed by" of a version recorded again from its files on disk.
 const RECOVERED_BY: &str = "App Center (recovered)";
 
@@ -427,6 +429,7 @@ impl PackageManager {
         if interval == 0 {
             return;
         }
+        self.watch_catalog();
         let me = self.clone();
         tokio::spawn(async move {
             let mut shutdown = me.events.shutdown_receiver();
@@ -483,6 +486,46 @@ impl PackageManager {
                     wait = Duration::from_millis(
                         remaining.clamp(60_000, (interval as i64) * 60_000) as u64,
                     );
+                }
+            }
+        });
+    }
+
+    /// Between the full checks, look every few minutes whether the
+    /// published catalog changed (a HEAD request, see
+    /// [`catalog::fingerprint`]) and check it then: a new release shows in
+    /// App Center, and in apps that offer their own Update button, minutes
+    /// after it is published.
+    fn watch_catalog(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut shutdown = me.events.shutdown_receiver();
+            let mut last: Option<String> = None;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(CATALOG_WATCH) => {}
+                    _ = shutdown.changed() => return,
+                }
+                let url = me.config.packages_catalog_url.clone();
+                let seen = tokio::task::spawn_blocking(move || catalog::fingerprint(&url))
+                    .await
+                    .ok()
+                    .and_then(|r| {
+                        r.map_err(|error| {
+                            tracing::debug!(%error, "could not look at the package catalog");
+                        })
+                        .ok()
+                    });
+                let Some(seen) = seen else {
+                    continue;
+                };
+                let changed = last.as_ref().is_some_and(|l| *l != seen);
+                last = Some(seen);
+                if changed {
+                    tracing::info!("the published package catalog changed; checking it");
+                    if let Err(error) = me.check_now(None).await {
+                        tracing::warn!(%error, "package catalog check failed");
+                    }
                 }
             }
         });

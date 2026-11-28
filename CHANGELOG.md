@@ -27,6 +27,15 @@ this file by `scripts/changelog-section.sh`.
   sandboxed frame of the site's own origin: it reaches nothing of RAST's.
   Scripts, styles and connections stay RAST's own.
 
+### Changed
+
+- **New package releases show within minutes.** Between the full catalog
+  checks (every `packages_check_interval_minutes`), RAST looks every three
+  minutes whether the published catalog changed (HEAD requests: each
+  redirect's target and the file's ETag, date and size) and checks it
+  then. App Center, and apps with their own Update button such as AI
+  Agent, show a new release soon after it is published, without a restart.
+
 ### Fixed
 
 - **AI Agent's sign-ins get their OAuth clients again.** App packages start

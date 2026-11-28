@@ -394,6 +394,13 @@ pub fn fetch(url: &str, keys: &[TrustedKey]) -> Result<Verified, String> {
     verify(&bytes, &signature, keys)
 }
 
+/// A mark that changes when the published catalog does (see
+/// [`net::fingerprint`]): asked every few minutes, so a new catalog is
+/// fetched soon after it is published.
+pub fn fingerprint(url: &str) -> Result<String, String> {
+    net::fingerprint(url, &catalog_fetch_policy(url))
+}
+
 pub fn cache_paths(dir: &Path) -> (PathBuf, PathBuf) {
     (dir.join("catalog.json"), dir.join("catalog.json.sig"))
 }

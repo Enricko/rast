@@ -170,6 +170,69 @@ fn short(url: &str) -> String {
     }
 }
 
+/// A cheap mark of a document's current version, without downloading it:
+/// each redirect's target (GitHub sends a release asset's download to a
+/// new address when the asset is replaced) and the final answer's ETag,
+/// Last-Modified and length, from HEAD requests. A local file: its size
+/// and modification time.
+pub fn fingerprint(url: &str, policy: &OriginPolicy) -> Result<String, String> {
+    if let Some(path) = url.strip_prefix("file://") {
+        policy.allows(url)?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("cannot read {url}: {e}"))?;
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        return Ok(format!("{}:{modified}", meta.len()));
+    }
+    let agent = agent(Duration::from_secs(30));
+    let mut current = url.to_string();
+    let mut marks = Vec::new();
+    for _ in 0..MAX_HOPS {
+        policy.allows(&current)?;
+        let response = agent
+            .head(&current)
+            .call()
+            .map_err(|e| format!("request to {} failed: {e}", short(&current)))?;
+        let status = response.status().as_u16();
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string()
+        };
+        if (300..400).contains(&status) {
+            let location = header("location");
+            if location.is_empty() {
+                return Err(format!(
+                    "redirect from {} without a location",
+                    short(&current)
+                ));
+            }
+            let next = resolve_location(&current, &location)?;
+            policy
+                .allows(&next)
+                .map_err(|e| format!("refused redirect from {}: {e}", short(&current)))?;
+            // The address without its (signed, changing) query.
+            marks.push(next.split('?').next().unwrap_or(&next).to_string());
+            current = next;
+            continue;
+        }
+        if !(200..300).contains(&status) {
+            return Err(format!("{} answered HTTP {status}", short(&current)));
+        }
+        marks.push(header("etag"));
+        marks.push(header("last-modified"));
+        marks.push(header("content-length"));
+        return Ok(marks.join("|"));
+    }
+    Err(format!("too many redirects for {}", short(url)))
+}
+
 /// Fetch a small document (catalog, manifest, API JSON) into memory.
 pub fn fetch_bytes(
     url: &str,
@@ -306,6 +369,25 @@ fn download_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A local catalog's mark follows its size and modification time.
+    #[test]
+    fn a_local_documents_mark_changes_with_it() {
+        let dir = std::env::temp_dir().join(format!("rast-fingerprint-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("catalog.json");
+        std::fs::write(&file, b"{}").unwrap();
+        let url = format!("file://{}", file.display());
+        let mut policy = OriginPolicy::new(Vec::<String>::new());
+        policy.allow_file = true;
+        let first = fingerprint(&url, &policy).unwrap();
+        assert_eq!(fingerprint(&url, &policy).unwrap(), first);
+        std::fs::write(&file, b"{\"sequence\": 2}").unwrap();
+        assert_ne!(fingerprint(&url, &policy).unwrap(), first);
+        let closed = OriginPolicy::new(Vec::<String>::new());
+        assert!(fingerprint(&url, &closed).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn host_parsing_rejects_tricks() {
