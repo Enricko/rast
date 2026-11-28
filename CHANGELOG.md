@@ -9,6 +9,23 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.18] - 2026-11-28
+
 ### Changed
 
 - **AI Agent moved out of RAST.** Its source, tests, API reference and
@@ -52,17 +69,6 @@ this file by `scripts/changelog-section.sh`.
   sandboxed frame, where Chrome refuses to show PDFs (a "blocked" page
   icon); the frame is now a plain one, and the preview's own `sandbox`
   content security policy still keeps anything in the file from running.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.17] - 2026-11-27
 
