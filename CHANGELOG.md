@@ -11,6 +11,16 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- **Server components in App Center.** A new section lists parts of the
+  operating system that RAST's apps use, installed by an administrator
+  with one click: LibreOffice (Writer, Calc, Impress), which AI Agent uses
+  to show Word, Excel and PowerPoint files as pages. apt installs a fixed
+  list of Ubuntu packages from the server's own sources, in a systemd unit
+  started by the root terminal helper, so a long download finishes even if
+  RAST restarts; the tile shows apt's progress. Its page lists the parts,
+  what Install adds and the installed version. `POST
+  /api/packages/components/{id}/install`; `GET /api/packages` lists
+  `components`.
 - **Web pages in frames.** The page policy lets frames show HTTPS sites
   (`frame-src 'self' https:`), for AI Agent's panel, which opens a linked
   web page beside the chat when the site allows framing. Each one is a

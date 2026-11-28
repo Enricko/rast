@@ -2695,6 +2695,53 @@ button.pkg-pill {
   text-shadow: none;
 }
 
+/* Server components (apt): an office-document mark in the system's colour. */
+.pkg-icon.is-component {
+  background: linear-gradient(150deg, #1f9d6b, #157a52);
+  color: #fff;
+}
+
+.pkg-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pkg-part {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13.5px;
+}
+
+.pkg-part:last-child {
+  border-bottom: 0;
+}
+
+.pkg-part > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+}
+
+.pkg-part.is-installed > svg {
+  color: var(--ok);
+}
+
+.pkg-part.is-missing > svg {
+  color: var(--text-faint);
+}
+
+.pkg-part-state {
+  flex: none;
+  font-size: var(--font-size-sm);
+  color: var(--text-faint);
+}
+
 /* Progress replaces the action while a job runs. */
 
 .pkg-progress {

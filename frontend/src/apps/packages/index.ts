@@ -56,6 +56,7 @@ import type {
   PackageDetail,
   PackageEvent,
   PackageView,
+  ServerComponent,
   VersionChoice,
 } from "./types";
 
@@ -97,6 +98,8 @@ class PackageCenterApp {
   private appGrid: HTMLElement | null = null;
   private appSection: HTMLElement | null = null;
   private runtimeSection: HTMLElement | null = null;
+  private componentGrid: HTMLElement | null = null;
+  private componentSection: HTMLElement | null = null;
   private selectedId: string | null = null;
   /** The RAST app whose page is open (instead of a package's). */
   private selectedApp: string | null = null;
@@ -239,8 +242,8 @@ class PackageCenterApp {
     });
     // The same window on another page (tab, device) went elsewhere.
     this.ctx.onPlace((params) => {
-      const place = (params ?? {}) as { app?: unknown; package?: unknown };
-      if (!place.app && !place.package) {
+      const place = (params ?? {}) as { app?: unknown; package?: unknown; component?: unknown };
+      if (!place.app && !place.package && !place.component) {
         this.selectedId = null;
         this.selectedApp = null;
         this.detail = null;
@@ -256,10 +259,15 @@ class PackageCenterApp {
 
   /**
    * `{ view }` opens a list, `{ app }` an app's page (Applications, the
-   * launcher), `{ package }` a package's page (a reopened window).
+   * launcher), `{ package }` a package's page (a reopened window),
+   * `{ component }` a server component's page (AI Agent's "install it").
+   * A component's page is kept as the app `component:<id>`.
    */
   private applyParams(params: unknown): void {
-    const wanted = (params ?? {}) as { view?: unknown; app?: unknown; package?: unknown };
+    const wanted = (params ?? {}) as { view?: unknown; app?: unknown; package?: unknown; component?: unknown };
+    if (typeof wanted.component === "string" && /^[a-z0-9-]+$/.test(wanted.component)) {
+      wanted.app = `component:${wanted.component}`;
+    }
     if (wanted.view === "installed" || wanted.view === "all" || wanted.view === "updates") {
       this.view = wanted.view;
       this.selectedId = null;
@@ -378,6 +386,11 @@ class PackageCenterApp {
     const id = data.id;
     if (kind === "job.done" || kind === "job.failed" || kind === "job.cancelled") {
       const known = this.jobs.get(id);
+      const component = (known?.packageId ?? this.packageForJob(id) ?? "").startsWith("component:")
+        ? this.overview?.components?.find((c) => `component:${c.id}` === (known?.packageId ?? this.packageForJob(id)))
+        : undefined;
+      if (component && kind === "job.done") this.ctx.toast.success(`${component.name} is installed.`);
+      if (component && kind === "job.failed") this.ctx.toast.error(data.error || `${component.name} was not installed.`);
       // installVersion reports its own jobs; this covers jobs started elsewhere.
       if (!this.busy.has(id) && this.cancelling.delete(id)) this.reportCancel(kind, known?.packageId ?? this.packageForJob(id));
       this.jobs.delete(id);
@@ -403,6 +416,9 @@ class PackageCenterApp {
   private packageForJob(jobId: string): string | null {
     for (const p of this.overview?.packages ?? []) {
       if (p.activeJob?.jobId === jobId) return p.id;
+    }
+    for (const c of this.overview?.components ?? []) {
+      if (c.jobId === jobId) return `component:${c.id}`;
     }
     return null;
   }
@@ -493,7 +509,8 @@ class PackageCenterApp {
     });
     this.renderChrome();
     this.renderSidebar();
-    if (this.selectedApp) this.renderAppDetail();
+    if (this.selectedApp?.startsWith("component:")) this.renderComponentDetail(this.selectedApp.slice("component:".length));
+    else if (this.selectedApp) this.renderAppDetail();
     else if (this.selectedId) this.renderDetail();
     else this.renderList();
   }
@@ -605,6 +622,18 @@ class PackageCenterApp {
       this.grid,
     );
     content.appendChild(this.runtimeSection);
+    this.componentSection = null;
+    this.componentGrid = null;
+    if (view !== "updates" && this.overview.components?.length) {
+      this.componentGrid = h("div", { class: "pkg-grid" });
+      this.componentSection = h(
+        "section",
+        { class: "pkg-group", ariaLabel: "Server components" },
+        h("h3", { class: "pkg-group-title" }, "Server components"),
+        this.componentGrid,
+      );
+      content.appendChild(this.componentSection);
+    }
     this.paintGrid();
     this.main.appendChild(content);
   }
@@ -653,6 +682,17 @@ class PackageCenterApp {
     if (!grid) return;
     clear(grid);
     const view = this.currentView();
+    if (this.componentGrid && this.componentSection) {
+      const query = this.query.trim().toLowerCase();
+      const components = (this.overview?.components ?? []).filter(
+        (c) =>
+          (view !== "installed" || c.installed !== "none") &&
+          (!query || `${c.name} ${c.summary} ${c.usedBy}`.toLowerCase().includes(query)),
+      );
+      clear(this.componentGrid);
+      for (const component of components) this.componentGrid.appendChild(this.componentTile(component));
+      this.componentSection.hidden = components.length === 0;
+    }
     const apps = this.appGrid ? filterApps(this.overview?.apps ?? [], view, this.query) : [];
     if (this.appGrid && this.appSection) {
       clear(this.appGrid);
@@ -751,6 +791,154 @@ class PackageCenterApp {
     }
     if (this.readOnly) return h("span", { class: "pkg-pill is-static" }, "Not installed");
     return this.pill("Install", "is-accent", `Install ${app.name}`, () => this.setAppInstalled(app, true));
+  }
+
+  // --------------------------------------------------- server components
+
+  private componentTile(c: ServerComponent): HTMLElement {
+    const openPage = () => this.openAppPage(`component:${c.id}`);
+    const open = h("button", { class: "pkg-tile-name", type: "button", title: `About ${c.name}` }, c.name);
+    open.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openPage();
+    });
+    const tile = h(
+      "article",
+      { class: `pkg-tile is-component is-${c.installed === "all" ? "installed" : "install"}`, dataset: { componentId: c.id } },
+      this.componentIconEl("tile"),
+      h(
+        "div",
+        { class: "pkg-tile-body" },
+        open,
+        h("div", { class: "pkg-tile-sub", title: c.summary }, componentLine(c)),
+        h("div", { class: "pkg-tile-foot" }, this.componentAction(c, "tile"), this.componentProgress(c, "tile")),
+      ),
+    );
+    tile.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button, a")) return;
+      openPage();
+    });
+    return tile;
+  }
+
+  /** Install (administrators) while a part is missing, else Installed. */
+  private componentAction(c: ServerComponent, size: "tile" | "hero"): HTMLElement | null {
+    const running = this.componentJob(c);
+    let action: HTMLElement | null;
+    if (c.installed === "all") action = size === "tile" ? h("span", { class: "pkg-pill is-static" }, "Installed") : null;
+    else if (!c.canInstall) action = size === "tile" ? h("span", { class: "pkg-pill is-static" }, "Administrators install it") : null;
+    else {
+      const label = c.installed === "some" ? "Add the rest" : "Install";
+      action =
+        size === "tile"
+          ? this.pill(label, "is-accent", `${label}: ${c.packages.join(", ")}`, () => this.installComponent(c))
+          : this.actionButton(label, "primary", () => this.installComponent(c));
+    }
+    if (!action) return null;
+    action.dataset.actionFor = `component:${c.id}`;
+    action.classList.toggle("hidden", Boolean(running));
+    return size === "hero" ? h("div", { class: "pkg-hero-actions" }, action) : action;
+  }
+
+  private componentJob(c: ServerComponent): LiveJob | null {
+    for (const job of this.jobs.values()) if (job.packageId === `component:${c.id}`) return job;
+    return c.jobId ? { jobId: c.jobId, packageId: `component:${c.id}`, progress: 0, total: 0, message: `Installing ${c.name}` } : null;
+  }
+
+  /** apt's progress (no Cancel: apt is not stopped halfway). */
+  private componentProgress(c: ServerComponent, size: "tile" | "hero"): HTMLElement {
+    const job = this.componentJob(c);
+    const host = h(
+      "div",
+      { class: `pkg-progress is-${size}${job ? "" : " hidden"}`, role: "status", ariaLive: "polite", dataset: { progressFor: `component:${c.id}` } },
+      h("div", { class: "pkg-progress-row" }, h("div", { class: "progress" }, h("div", { class: "progress-bar" }))),
+      h("div", { class: "pkg-progress-label" }, ""),
+    );
+    if (job) paintBar(host, job, false);
+    return host;
+  }
+
+  private async installComponent(c: ServerComponent): Promise<void> {
+    try {
+      const { jobId } = await this.ctx.api.post<{ jobId: string }>(`/api/packages/components/${encodeURIComponent(c.id)}/install`);
+      this.jobs.set(jobId, { jobId, packageId: `component:${c.id}`, progress: 0, total: 0, message: `Installing ${c.name}` });
+      this.paintProgress(`component:${c.id}`);
+    } catch (error) {
+      this.ctx.toast.error(errorMessage(error));
+    }
+  }
+
+  private componentIconEl(size: "tile" | "hero"): HTMLElement {
+    return h("div", { class: `pkg-icon pkg-icon-${size} is-component`, ariaHidden: true }, iconSvg("file", size === "hero" ? 46 : 28));
+  }
+
+  private renderComponentDetail(id: string): void {
+    clear(this.main);
+    this.grid = null;
+    this.appGrid = null;
+    this.componentGrid = null;
+    const content = h("div", { class: "app-content pkg-content pkg-detail" });
+    this.main.appendChild(content);
+    if (!this.overview) {
+      content.appendChild(h("div", { class: "loading-block" }, h("span", { class: "spinner" }), "Loading…"));
+      return;
+    }
+    const c = this.overview.components?.find((candidate) => candidate.id === id);
+    if (!c) {
+      content.appendChild(emptyBlock("This component is not available", "Go back to the list of packages."));
+      return;
+    }
+    const status = c.installed === "all" ? "Installed" : c.installed === "some" ? "Partly installed" : "Not installed";
+    content.append(
+      h(
+        "section",
+        { class: "pkg-hero" },
+        this.componentIconEl("hero"),
+        h(
+          "div",
+          { class: "pkg-hero-body" },
+          h("div", { class: "pkg-hero-publisher" }, iconSvg("shield", 13), "Ubuntu · Server component"),
+          h("h2", { class: "pkg-hero-name" }, c.name),
+          h("div", { class: `pkg-hero-status is-${c.installed === "all" ? "installed" : "available"}` }, c.version ? `${status} · ${c.version}` : status),
+          this.componentAction(c, "hero"),
+          this.componentProgress(c, "hero"),
+        ),
+      ),
+      h("p", { class: "pkg-about" }, c.about),
+      h(
+        "section",
+        { class: "pkg-section" },
+        h("h3", { class: "pkg-section-title" }, "Parts"),
+        h(
+          "ul",
+          { class: "pkg-parts" },
+          ...c.parts.map((part) =>
+            h(
+              "li",
+              { class: `pkg-part is-${part.installed ? "installed" : "missing"}` },
+              iconSvg(part.installed ? "check" : "plus", 14),
+              h("span", {}, part.label),
+              h("span", { class: "pkg-part-state" }, part.installed ? "Installed" : "To add"),
+            ),
+          ),
+        ),
+      ),
+    );
+    const items: Array<[string, string]> = [
+      ["Used by", c.usedBy],
+      ["From", "Ubuntu's package archive, with apt (signed by Ubuntu)"],
+      ["Installs", c.packages.length ? c.packages.join(", ") : "Everything is installed"],
+      ["Updates", "With the server's other Ubuntu updates"],
+      ["Who installs it", "Administrators (Terminal must be on: apt runs as root)"],
+    ];
+    content.appendChild(
+      h(
+        "section",
+        { class: "pkg-section" },
+        h("h3", { class: "pkg-section-title" }, "Other information"),
+        h("dl", { class: "pkg-info" }, ...items.map(([k, v]) => h("div", { class: "pkg-info-item" }, h("dt", {}, k), h("dd", {}, v)))),
+      ),
+    );
   }
 
   private appIconEl(app: AppPackage, size: "tile" | "hero"): HTMLElement {
@@ -1935,3 +2123,13 @@ export const packagesApp: AppDefinition = {
     await app.start();
   },
 };
+
+/** A server component's tile line: what it does, or what of it is there. */
+function componentLine(c: ServerComponent): string {
+  if (c.installed === "all") return c.version ? `Installed · ${c.version}` : "Installed";
+  if (c.installed === "some") {
+    const missing = c.parts.filter((part) => !part.installed).map((part) => part.label.split(":")[0]);
+    return `${missing.join(" and ")} to add`;
+  }
+  return c.summary;
+}

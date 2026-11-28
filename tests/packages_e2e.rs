@@ -1091,6 +1091,89 @@ async fn granted_groups_manage_packages_and_uninstall_removes_everything() {
 }
 
 #[tokio::test]
+async fn server_components_are_listed_and_only_administrators_install_them() {
+    let server = Server::start().await;
+    let admin = server.login("admin", Role::Admin).await;
+    let keeper = server.login("keeper", Role::User).await;
+    let viewer = server.login("viewer", Role::User).await;
+    let keeper_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'keeper'")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/groups",
+            Some(json!({
+                "name": "Runtime Keepers",
+                "members": [keeper_id],
+                "appRules": [{"appId": "packages", "rule": "allow"}]
+            })),
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // LibreOffice, with its parts and what Install would add.
+    let (status, body) = server
+        .request("GET", "/api/packages", None, admin.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let office = body["components"]
+        .as_array()
+        .and_then(|c| c.iter().find(|c| c["id"] == "libreoffice"))
+        .cloned()
+        .unwrap_or_else(|| panic!("LibreOffice is listed: {body}"));
+    let parts: Vec<&str> = office["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(parts, ["writer", "calc", "impress"]);
+    assert_eq!(office["canInstall"], true);
+    assert!(["all", "some", "none"].contains(&office["installed"].as_str().unwrap()));
+    for package in office["packages"].as_array().unwrap() {
+        assert!(
+            package.as_str().unwrap().starts_with("libreoffice-"),
+            "{office}"
+        );
+    }
+    assert_eq!(office["jobId"], Value::Null);
+
+    // A group granted App Center sees it, but apt runs as root: admins only.
+    let (_, body) = server
+        .request("GET", "/api/packages", None, keeper.clone())
+        .await;
+    let office = body["components"]
+        .as_array()
+        .and_then(|c| c.iter().find(|c| c["id"] == "libreoffice"))
+        .cloned()
+        .unwrap();
+    assert_eq!(office["canInstall"], false);
+    for (who, session) in [("keeper", keeper.clone()), ("viewer", viewer.clone())] {
+        let (status, body) = server
+            .request(
+                "POST",
+                "/api/packages/components/libreoffice/install",
+                None,
+                session,
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}: {body}");
+    }
+    let (status, _) = server
+        .request(
+            "POST",
+            "/api/packages/components/curl/install",
+            None,
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "only the listed components");
+}
+
+#[tokio::test]
 async fn optional_apps_are_uninstalled_and_installed_in_package_center() {
     let server = Server::start().await;
     let admin = server.login("admin", Role::Admin).await;

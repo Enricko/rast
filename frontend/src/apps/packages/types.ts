@@ -250,9 +250,29 @@ export interface AppPackage {
   removable: boolean;
 }
 
+/** A part of the operating system RAST's apps use, added with apt
+ * (src/packages/components.rs). */
+export interface ServerComponent {
+  id: string;
+  name: string;
+  summary: string;
+  about: string;
+  usedBy: string;
+  parts: Array<{ id: string; label: string; installed: boolean }>;
+  installed: "all" | "some" | "none";
+  version: string | null;
+  /** What Install adds (apt packages). */
+  packages: string[];
+  canInstall: boolean;
+  /** The running install's job. */
+  jobId: string | null;
+}
+
 export interface Overview {
   /** RAST's own apps (absent on older servers). */
   apps?: AppPackage[];
+  /** Server components (absent on older servers). */
+  components?: ServerComponent[];
   host: HostInfo;
   catalog: CatalogStatus;
   shell?: ShellPath | null;

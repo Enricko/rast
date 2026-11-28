@@ -65,6 +65,10 @@ pub fn routes() -> Router<AppState> {
             put(update_consumer).delete(delete_consumer),
         )
         .route("/api/packages/apps/{id}/install", post(install_app))
+        .route(
+            "/api/packages/components/{id}/install",
+            post(install_component),
+        )
         .route("/api/packages/apps/{id}", delete(uninstall_app))
         .route("/api/packages/{id}", get(package).delete(uninstall))
         .route("/api/packages/{id}/install", post(install))
@@ -83,7 +87,20 @@ pub async fn overview(State(state): State<AppState>, user: AuthUser) -> AppResul
     let overview = state.packages.overview(manage).await?;
     let mut body = serde_json::to_value(overview).map_err(|e| AppError::internal(e.to_string()))?;
     body["apps"] = json!(apps_state(&state).await);
+    body["components"] = json!(crate::packages::components::list(&user).await);
     Ok(Json(body))
+}
+
+/// POST /api/packages/components/{id}/install — add what a server component
+/// is missing with apt (administrators; see [`crate::packages::components`])
+/// → `{jobId}`.
+pub async fn install_component(
+    State(state): State<AppState>,
+    PackageManager(user): PackageManager,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let job_id = crate::packages::components::install(&state, &user, &id).await?;
+    Ok(Json(json!({ "jobId": job_id })))
 }
 
 /// RAST's own apps as App Center lists them: built-in ones are always
