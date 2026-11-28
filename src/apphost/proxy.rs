@@ -188,8 +188,61 @@ fn copy_headers(from: &HeaderMap, to: &mut HeaderMap, towards_app: bool) {
     }
 }
 
+/// What a web page window's files may do: run their own scripts and
+/// WebAssembly in an opaque origin (`sandbox` without `allow-same-origin`,
+/// also when opened in a tab of their own), so they reach neither the
+/// session nor RAST's API, and keep no storage; they may reach the web
+/// (as the same app would on the person's own computer).
+const WEB_CSP: &str = "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock; \
+default-src 'self'; \
+script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; \
+style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; \
+media-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' data: blob: https:; \
+frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+
+/// The secret part of a web page window's address: the same for a version's
+/// files on this server, unguessable without the server's secret.
+fn web_key(state: &AppState, app: &App) -> String {
+    let message = format!("{}\n{}\n{}", app.app_id, app.version, app.revision);
+    state.secrets.hmac_hex("app web files", message.as_bytes())
+}
+
+/// The media type RAST serves an app's file as.
+fn media_type(file: &std::path::Path) -> &'static str {
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "html" | "htm" => "text/html; charset=utf-8",
+        "wasm" => "application/wasm",
+        "json" | "map" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 /// What the desktop needs to add an app window.
-pub fn window_view(app: &App) -> Value {
+pub fn window_view(state: &AppState, app: &App) -> Value {
     let base = format!(
         "/api/appfiles/{}/{}/{}/",
         app.app_id, app.version, app.revision
@@ -210,6 +263,13 @@ pub fn window_view(app: &App) -> Value {
         "defaultSize": window.default_size,
         "minSize": window.min_size,
         "opens": window.opens,
+        "web": window.is_web().then(|| {
+            let page = std::path::Path::new(&window.entry)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("index.html");
+            format!("/api/appweb/{}/{page}", web_key(state, app))
+        }),
         "apiPrefix": app.api_prefix(),
         "server": app.status(),
     })
@@ -221,10 +281,93 @@ pub async fn windows(State(state): State<AppState>, user: AuthUser) -> AppResult
     let mut out = Vec::new();
     for app in state.apps.list() {
         if may_open(&state, &user, &app).await? {
-            out.push(window_view(&app));
+            out.push(window_view(&state, &app));
         }
     }
     Ok(Json(json!({ "apps": out })))
+}
+
+/// GET /api/appweb/{key}/{*path} — a file of a web page window (the folder
+/// of its page), under [`WEB_CSP`]. The key in the address comes only with
+/// `/api/appfiles` (to accounts that may open the app); the page runs in an
+/// opaque origin, so its own requests carry no session and the files are
+/// served by the key alone. A version's files never change.
+pub async fn web_files(
+    State(state): State<AppState>,
+    Path((key, path)): Path<(String, String)>,
+) -> AppResult<Response> {
+    let not_found = || AppError::NotFound("app file not found");
+    let app = state
+        .apps
+        .list()
+        .into_iter()
+        .filter(|app| app.spec.window.is_web())
+        .find(|app| {
+            let message = format!("{}\n{}\n{}", app.app_id, app.version, app.revision);
+            state
+                .secrets
+                .verify_hmac_hex("app web files", message.as_bytes(), &key)
+        })
+        .ok_or_else(not_found)?;
+    let relative = std::path::Path::new(&path);
+    if !relative
+        .components()
+        .all(|c| matches!(c, Component::Normal(_)))
+    {
+        return Err(not_found());
+    }
+    let folder = std::path::Path::new(&app.spec.window.entry)
+        .parent()
+        .unwrap_or(std::path::Path::new(""));
+    let root = tokio::fs::canonicalize(app.root.join(folder))
+        .await
+        .map_err(|_| not_found())?;
+    let file = tokio::fs::canonicalize(root.join(relative))
+        .await
+        .map_err(|_| not_found())?;
+    if !file.starts_with(&root) {
+        return Err(not_found());
+    }
+    let opened = tokio::fs::File::open(&file)
+        .await
+        .map_err(|_| not_found())?;
+    let meta = opened.metadata().await.map_err(|_| not_found())?;
+    if !meta.is_file() {
+        return Err(not_found());
+    }
+    let body = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+        opened,
+        256 * 1024,
+    ));
+    let mut response = Response::new(body);
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(media_type(&file)),
+    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(meta.len()));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(WEB_CSP),
+    );
+    // The page's origin is opaque: its scripts and WebAssembly load with CORS.
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
 }
 
 async fn may_open(state: &AppState, user: &AuthUser, app: &App) -> AppResult<bool> {
@@ -282,20 +425,14 @@ pub async fn files(
     if !file.starts_with(&root) {
         return Err(AppError::NotFound("app file not found"));
     }
+    if app.spec.window.is_web() {
+        // A web page's files are served only sandboxed (`/api/appweb`).
+        return Err(AppError::NotFound("app file not found"));
+    }
     let bytes = tokio::fs::read(&file)
         .await
         .map_err(|_| AppError::NotFound("app file not found"))?;
-    let mime = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" | "map" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "woff2" => "font/woff2",
-        "txt" => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
-    };
+    let mime = media_type(&file);
     let mut response = bytes.into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));

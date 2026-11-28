@@ -480,9 +480,9 @@
           ],
           "properties": {
             "entry": {
-              "description": "ES module whose default export is { mount(ctx, sdk) }.",
+              "description": "ES module whose default export is { mount(ctx, sdk) }, or a self-contained web page (.html) shown in a sandboxed frame of its own origin (then no styles or opens).",
               "$ref": "#/$defs/relativePath",
-              "pattern": "\\.js$"
+              "pattern": "\\.(js|html)$"
             },
             "styles": {
               "type": "array",

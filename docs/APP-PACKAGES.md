@@ -40,6 +40,17 @@ an `app` section; the `runtime` section is optional:
   group or account rule says otherwise (it does only what the person could
   do through RAST's API); an app with a server program needs an
   administrator's grant. Both are listed in the access rules.
+- A web page window: `window.entry` names an `.html` page (e.g.
+  `web/index.html`, with `sdk: 1` and no `styles` or `opens`), a
+  self-contained web app such as the Craft apps' WebAssembly builds. The
+  desktop shows it in a frame sandboxed without `allow-same-origin`, so it
+  runs in an opaque origin: no session, no RAST API, no storage, and it may
+  reach the web. RAST serves the page's folder at
+  `/api/appweb/<key>/…` (`key` = HMAC of app id, version and revision with
+  the server's secret, given only with `/api/appfiles`) without a sign-in,
+  with `.wasm` as `application/wasm`, `Access-Control-Allow-Origin: *` and
+  the policy `WEB_CSP` in `src/apphost/proxy.rs` (inline scripts and
+  `'wasm-unsafe-eval'` allowed in the sandbox).
 - `window.entry`: an ES module whose default export is `{ mount(ctx, sdk) }`;
   RAST serves the entry's folder at
   `/api/appfiles/<appId>/<version>/<revision>/…` (immutable per version).

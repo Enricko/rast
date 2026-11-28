@@ -94,6 +94,8 @@ pub const HOST_API_SEGMENTS: &[&str] = &[
     "access",
     "me",
     "notifications",
+    "appfiles",
+    "appweb",
 ];
 /// Ids that collide with API path segments (`/api/packages/<id>`).
 pub const RESERVED_IDS: &[&str] = &["check", "consumers", "github", "host", "catalog", "bin"];
@@ -376,7 +378,10 @@ pub struct AppSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppWindow {
     /// The window's ES module (relative path), whose default export mounts
-    /// the app: `export default { mount(ctx, sdk) }`.
+    /// the app: `export default { mount(ctx, sdk) }`. Or a web page
+    /// (`.html`): a self-contained web app the desktop shows in a sandboxed
+    /// frame of its own origin, which reaches nothing of RAST (no session,
+    /// no API, no storage); the page's folder is served next to it.
     pub entry: String,
     /// Style sheets the window needs (relative paths).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -397,6 +402,13 @@ pub struct AppWindow {
     /// parameters `{"path": "<the file>"}`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub opens: Vec<String>,
+}
+
+impl AppWindow {
+    /// The window is a web page shown in a sandboxed frame.
+    pub fn is_web(&self) -> bool {
+        self.entry.ends_with(".html")
+    }
 }
 
 /// The file kinds a window may name in `opens`.
@@ -928,7 +940,17 @@ fn validate_app(app: &AppSpec) -> Result<(), String> {
             ))
         }
     };
-    file("app.window.entry", &window.entry, ".js")?;
+    if window.is_web() {
+        file("app.window.entry", &window.entry, ".html")?;
+        if !window.styles.is_empty() || !window.opens.is_empty() {
+            return Err(
+                "a web page window (app.window.entry ending in .html) takes no styles or opens"
+                    .into(),
+            );
+        }
+    } else {
+        file("app.window.entry", &window.entry, ".js")?;
+    }
     if window.styles.len() > 8 {
         return Err("app.window.styles lists at most 8 files".into());
     }
@@ -1430,6 +1452,28 @@ pub(crate) mod tests {
         let round = serde_json::to_value(&m).unwrap();
         assert!(round.get("runtime").is_none(), "{round}");
         assert_eq!(parse_value(&round).unwrap(), m);
+        // A web page window: a self-contained page, nothing else to load.
+        let mut web = sample_app();
+        web["app"]["window"] = serde_json::json!({"entry": "web/index.html", "sdk": 1});
+        web["app"].as_object_mut().unwrap().remove("server");
+        assert!(parse_value(&web).unwrap().app.unwrap().window.is_web());
+        for (what, window) in [
+            (
+                "styles",
+                serde_json::json!({"entry": "web/index.html", "sdk": 1, "styles": ["a.css"]}),
+            ),
+            (
+                "opens",
+                serde_json::json!({"entry": "web/index.html", "sdk": 1, "opens": ["text"]}),
+            ),
+            (
+                "another page type",
+                serde_json::json!({"entry": "web/index.php", "sdk": 1}),
+            ),
+        ] {
+            web["app"]["window"] = window;
+            assert!(parse_value(&web).is_err(), "{what}");
+        }
         // Files the window opens: kinds and extensions.
         let mut opens = sample_app();
         opens["app"]["window"]["opens"] = serde_json::json!(["text", ".py", ".c++", ".tar_gz"]);

@@ -91,6 +91,12 @@ fn public_routes() -> Router<AppState> {
         .route("/api/setup/status", get(auth::setup_status))
         .route("/api/setup", axum::routing::post(auth::setup))
         .route("/api/auth/login", axum::routing::post(auth::login))
+        // Web page windows' files: their pages run in an opaque origin, so
+        // their requests carry no session; the address's key is the check.
+        .route(
+            "/api/appweb/{key}/{*path}",
+            get(crate::apphost::proxy::web_files),
+        )
 }
 
 /// Shared helper: JSON 501 for features not yet available on this host.

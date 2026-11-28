@@ -4,7 +4,7 @@
 // versioned path) and hands it the window context and the SDK.
 
 import type { ApiClient } from "./api";
-import type { AppDefinition, AppInstance } from "./app";
+import type { AppContext, AppDefinition, AppInstance } from "./app";
 import { setPackageAppIcon } from "./icons";
 import { sdk } from "./sdk";
 
@@ -25,6 +25,39 @@ export interface PackageWindow {
   icon?: { mediaType: string; data: string } | null;
   /** Files the window opens (File Station's "Open with"). */
   opens?: string[] | null;
+  /**
+   * Set for a web page window: the page's address. It shows in a sandboxed
+   * frame of its own origin, which reaches nothing of RAST.
+   */
+  web?: string | null;
+}
+
+/** What a web page window's frame may do (the server's policy says the same). */
+const WEB_SANDBOX = "allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock";
+
+/** Show a web page window: its page fills the window. */
+function mountWebPage(ctx: AppContext, window: PackageWindow, page: string): AppInstance {
+  const frame = document.createElement("iframe");
+  frame.className = "package-web-frame";
+  frame.src = page;
+  frame.title = window.name;
+  frame.setAttribute("sandbox", WEB_SANDBOX);
+  frame.setAttribute("allow", "fullscreen; clipboard-read; clipboard-write");
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  ctx.root.classList.add("package-web-root");
+  ctx.root.replaceChildren(frame);
+  // A click inside the frame stays in the frame: bring the window forward
+  // when the frame takes the focus.
+  const onBlur = () => {
+    if (document.activeElement === frame) ctx.window.focus();
+  };
+  globalThis.addEventListener("blur", onBlur);
+  return {
+    destroy() {
+      globalThis.removeEventListener("blur", onBlur);
+      frame.remove();
+    },
+  };
 }
 
 interface WindowModule {
@@ -74,6 +107,7 @@ export function packageAppDefinition(window: PackageWindow): AppDefinition {
     ...(window.opens?.length ? { opens: window.opens.slice() } : {}),
     packageVersion: window.version,
     async mount(ctx) {
+      if (window.web) return mountWebPage(ctx, window, window.web);
       // The module reads the SDK as it loads: publish it first.
       const lent = sdk();
       await Promise.all(window.styles.map((url) => loadStyle(window.appId, url)));
