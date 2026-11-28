@@ -9,8 +9,49 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.19] - 2026-11-28
+
 ### Added
 
+- **Ask AI from RAST's apps.** File Station (an item's menu), Activity Logs
+  (an entry's details), Resource Monitor (the toolbar, with the latest
+  readings), Docker (a container's logs) and Terminal (the selection, or
+  the latest output) open AI Agent on a new chat with that text in its
+  message box, for the person to finish and send. The action shows for
+  accounts that may open AI Agent; it fills the message box with AI Agent
+  1.7.0 or later.
+- **An account's apps in the host API.** `GET /v1/users/{id}/apps` lists the apps
+  an account may open, with the files each one opens, so an app such as AI
+  Agent can open them for that person.
+- **Open with.** An app's window can name the files it opens
+  (`app.window.opens`: a kind such as `text`, `image` or `pdf`, or an
+  extension like `.py`). File Station offers "Open in <app>" for those
+  files in the item menu, the details panel and the preview, and a file
+  without a preview opens in the first such app on a double-click. The app
+  opens with the parameters `{ path }`.
+- **Web page windows.** An app's window may be a web page
+  (`app.window.entry` ending in `.html`), such as the Craft apps'
+  WebAssembly builds. The desktop shows it in a frame sandboxed without
+  `allow-same-origin`: it runs in an opaque origin with no session, no
+  access to RAST's API and no storage, so its settings last until the
+  window closes. RAST serves the page's folder at `/api/appweb/<key>/…`
+  (the key is an HMAC of the app's id, version and revision with the
+  server's secret, handed out only with `/api/appfiles` to accounts that
+  may open the app), with `.wasm` as `application/wasm`, CORS for the
+  opaque origin, a policy that allows the page's inline scripts and
+  WebAssembly inside the sandbox, and immutable caching. Clicking into the
+  frame brings its window forward.
 - **Server components in App Center.** A new section lists parts of the
   operating system that RAST's apps use, installed by an administrator
   with one click: LibreOffice (Writer, Calc, Impress), which AI Agent uses
@@ -29,6 +70,20 @@ this file by `scripts/changelog-section.sh`.
 
 ### Changed
 
+- **App Center apps open for every account, with their own icon.**
+  Installed package apps join the access policy: they appear in group and
+  account rules, the Applications folder and pinning. An app with only a
+  window (no server program) does just what the person could already do
+  through RAST's API, so every account may open it unless a rule says
+  otherwise; apps with a server program still need an administrator's
+  grant. The desktop shows each package app's own icon (from its manifest,
+  or the catalog's when the manifest has none) wherever app icons appear.
+- **The catalog builder takes any app package**, beyond AI Agent: releases
+  tagged `<id>-v<version>` in the package's `releaseRepos`, checksums from
+  `SHA256SUMS`, build-provenance attestations verified; a window-only app
+  needs no server program. A web page app's catalog version notes that
+  RAST shows it in a sandboxed window of its own origin, and app packages
+  besides AI Agent are credited to their repository's release workflow.
 - **New package releases show within minutes.** Between the full catalog
   checks (every `packages_check_interval_minutes`), RAST looks every three
   minutes whether the published catalog changed (HEAD requests: each
@@ -45,17 +100,6 @@ this file by `scripts/changelog-section.sh`.
   with "sign-in needs its OAuth client". RAST now passes an app package
   exactly those settings (names `RAST_<NAME>_CLIENT_ID` and
   `RAST_<NAME>_CLIENT_SECRET`) from its own environment, nothing else.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.18] - 2026-11-28
 
