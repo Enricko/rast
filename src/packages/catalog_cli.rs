@@ -4728,7 +4728,7 @@ fn verify_item(
             } else if item.package == "ai-agent" {
                 "Built by RAST's ai-agent workflow; SHA-256 from the release SHA256SUMS, equal to the GitHub asset digest; build-provenance attestation verified with gh attestation verify; window files and the server's --version checked on the native runner".into()
             } else if app_item(item) {
-                format!("Built by this repository's {} workflow; SHA-256 from the release SHA256SUMS, equal to the GitHub asset digest; build-provenance attestation verified with gh attestation verify; window files checked on the native runner", item.package)
+                "Built by its repository's release workflow; SHA-256 from the release SHA256SUMS, equal to the GitHub asset digest; build-provenance attestation verified with gh attestation verify; window files checked on the native runner".into()
             } else {
                 "SHA-256 from the release SHASUMS256.txt, equal to the GitHub asset digest; downloaded and re-hashed in CI".into()
             };
@@ -6057,6 +6057,17 @@ fn build_manifest(
                     "glibc": "2.35",
                     "notes": "RAST runs the server program (bin/rast-ai-agent) and opens the window (ui/) with its window SDK."
                 }),
+                _ if app.as_ref().is_some_and(|app| {
+                    app.get("server").is_none()
+                        && app["window"]["entry"]
+                            .as_str()
+                            .is_some_and(|entry| entry.ends_with(".html"))
+                }) =>
+                {
+                    json!({
+                        "notes": "A web page (web/) RAST shows in a sandboxed window of its own origin, which reaches nothing of RAST and keeps no storage: there is no server program."
+                    })
+                }
                 _ if app.as_ref().is_some_and(|app| app.get("server").is_none()) => json!({
                     "notes": "A window only (ui/), opened by RAST with its window SDK: there is no server program."
                 }),
@@ -9516,6 +9527,26 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
             .as_str()
             .unwrap()
             .contains("no server program"));
+        let parsed = manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        manifest::validate(&parsed).unwrap();
+
+        // A web page app (the Craft apps): its own note.
+        let entry = cfg
+            .packages
+            .entries
+            .iter_mut()
+            .find(|(id, _)| id == "code-editor")
+            .unwrap();
+        entry.1.app = Some(json!({"id": "code", "window": {"entry": "web/index.html", "sdk": 1}}));
+        let mut item = item.clone();
+        item.source.as_mut().unwrap()["app"] = entry.1.app.clone().unwrap();
+        let (manifest, _) = build_manifest(&cfg, &item, &outcomes_for(&item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["app"]["window"]["entry"], "web/index.html");
+        assert!(manifest["artifacts"][0]["requires"]["notes"]
+            .as_str()
+            .unwrap()
+            .contains("sandboxed window"));
         let parsed = manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
         manifest::validate(&parsed).unwrap();
     }
