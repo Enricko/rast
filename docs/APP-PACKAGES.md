@@ -31,6 +31,15 @@ an `app` section; the `runtime` section is optional:
 
 - `id`: the desktop app id. A package app with a built-in app's id takes its
   place (its window, its `/api/<segment>`, its access rules).
+- `window.opens` (optional): files the window opens, offered in File
+  Station's menu, preview and details as "Open in <app>": a kind (`text`,
+  `image`, `pdf`, as File Station recognizes them) or an extension with its
+  dot (`.py`), at most 64. The app opens with the parameters `{ path }`; a
+  file without a preview opens in the first such app on a double-click.
+- Access: an app with only a window may be opened by every account unless a
+  group or account rule says otherwise (it does only what the person could
+  do through RAST's API); an app with a server program needs an
+  administrator's grant. Both are listed in the access rules.
 - `window.entry`: an ES module whose default export is `{ mount(ctx, sdk) }`;
   RAST serves the entry's folder at
   `/api/appfiles/<appId>/<version>/<revision>/…` (immutable per version).

@@ -92,5 +92,11 @@ export interface AppDefinition {
   minSize?: { w: number; h: number };
   /** Set for Package Center apps: the installed version. */
   packageVersion?: string;
+  /**
+   * Files the app opens, offered in File Station's "Open with": a kind
+   * (`text`, `image`, `pdf`) or an extension with its dot (`.py`). The app
+   * is opened with the parameters `{ path }`.
+   */
+  opens?: string[];
   mount(ctx: AppContext): AppInstance | void | Promise<AppInstance | void>;
 }

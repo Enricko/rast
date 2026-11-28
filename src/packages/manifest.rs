@@ -391,7 +391,16 @@ pub struct AppWindow {
     pub default_size: Option<WindowSize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_size: Option<WindowSize>,
+    /// Files the window opens, offered in File Station's "Open with": a
+    /// kind (`text`, `image` or `pdf`, as File Station recognizes them) or
+    /// an extension with its dot (`.py`). The window is opened with the
+    /// parameters `{"path": "<the file>"}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opens: Vec<String>,
 }
+
+/// The file kinds a window may name in `opens`.
+pub const WINDOW_OPENS_KINDS: [&str; 3] = ["text", "image", "pdf"];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -937,6 +946,22 @@ fn validate_app(app: &AppSpec) -> Result<(), String> {
             return Err("app.window sizes must be 200-4000 wide and 150-3000 high".into());
         }
     }
+    if window.opens.len() > 64 {
+        return Err("app.window.opens lists at most 64 entries".into());
+    }
+    for entry in &window.opens {
+        let extension = entry.strip_prefix('.').is_some_and(|ext| {
+            (1..=15).contains(&ext.len())
+                && ext
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+-_".contains(&b))
+        });
+        if !extension && !WINDOW_OPENS_KINDS.contains(&entry.as_str()) {
+            return Err(format!(
+                "app.window.opens entry {entry:?} must be text, image, pdf or a lowercase extension like \".py\""
+            ));
+        }
+    }
     if let Some(server) = &app.server {
         if !is_safe_relative_path(&server.executable) {
             return Err(format!(
@@ -1405,6 +1430,14 @@ pub(crate) mod tests {
         let round = serde_json::to_value(&m).unwrap();
         assert!(round.get("runtime").is_none(), "{round}");
         assert_eq!(parse_value(&round).unwrap(), m);
+        // Files the window opens: kinds and extensions.
+        let mut opens = sample_app();
+        opens["app"]["window"]["opens"] = serde_json::json!(["text", ".py", ".c++", ".tar_gz"]);
+        let parsed = parse_value(&opens).unwrap();
+        assert_eq!(
+            parsed.app.unwrap().window.opens,
+            ["text", ".py", ".c++", ".tar_gz"]
+        );
         let cases: Vec<(&str, Mutation)> = vec![
             (
                 "no app section",
@@ -1439,6 +1472,18 @@ pub(crate) mod tests {
             (
                 "future host API",
                 Box::new(|v| v["app"]["server"]["hostApi"] = 2.into()),
+            ),
+            (
+                "an unknown file kind",
+                Box::new(|v| v["app"]["window"]["opens"] = serde_json::json!(["video"])),
+            ),
+            (
+                "an extension without its dot",
+                Box::new(|v| v["app"]["window"]["opens"] = serde_json::json!(["py"])),
+            ),
+            (
+                "an upper-case extension",
+                Box::new(|v| v["app"]["window"]["opens"] = serde_json::json!([".PY"])),
             ),
             (
                 "future SDK",

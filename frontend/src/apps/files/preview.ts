@@ -10,7 +10,7 @@ import { errorMessage, modal } from "../../core/ui";
 import { isAbortError, type AppLifecycle } from "../../components/lifecycle";
 import { isUnavailableError, unavailableReason, unavailableState } from "../../components/states";
 import { formatBytes, formatDateTime } from "../../core/format";
-import { ACCESS_CHANGED_ITEM_MESSAGE, previewKind, type TextPayload } from "./types";
+import { ACCESS_CHANGED_ITEM_MESSAGE, openersFor, previewKind, type TextPayload } from "./types";
 
 const TEXT_PREVIEW_BYTES = 262_144;
 
@@ -32,6 +32,15 @@ export function openPreview(ctx: AppContext, lifecycle: AppLifecycle, entry: Fil
     { class: "preview-actions" },
     actionButton("Download", () => ctx.api.download(entry.path)),
   );
+  // Apps that open this file (e.g. Code Editor for code).
+  for (const app of openersFor(ctx.desktop.apps(), entry)) {
+    actions.appendChild(
+      actionButton(`Open in ${app.name}`, () => {
+        ctx.openApp(app.id, { path: entry.path });
+        closeModal();
+      }),
+    );
+  }
   if (kind === "image" || kind === "pdf") {
     const anchor = h(
       "a",
@@ -141,7 +150,7 @@ export function openPreview(ctx: AppContext, lifecycle: AppLifecycle, entry: Fil
     );
   }
 
-  modal({
+  const closeModal = modal({
     within: ctx.root,
     title: `Preview — ${entry.name}`,
     body,

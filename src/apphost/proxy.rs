@@ -209,6 +209,7 @@ pub fn window_view(app: &App) -> Value {
         "adminOnly": window.admin_only,
         "defaultSize": window.default_size,
         "minSize": window.min_size,
+        "opens": window.opens,
         "apiPrefix": app.api_prefix(),
         "server": app.status(),
     })

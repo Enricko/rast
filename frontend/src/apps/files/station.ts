@@ -36,6 +36,7 @@ import {
   isAccessError,
   joinPath,
   listingItems,
+  openersFor,
   parentPath,
   previewKind,
   sortEntries,
@@ -1473,6 +1474,11 @@ export class FileStation {
           toolButton("Preview", "eye", () => openPreview(this.ctx, this.lc, entry), "primary", undefined, true),
         );
       }
+      openersFor(this.ctx.desktop.apps(), entry).forEach((app, index) => {
+        const style = index === 0 && !previewKind(entry) ? "primary" : "ghost";
+        const open = () => this.ctx.openApp(app.id, { path: entry.path });
+        actions.appendChild(toolButton(`Open in ${app.name}`, "external", open, style, undefined, true));
+      });
       actions.appendChild(toolButton("Download", "download", () => void this.downloadFile(entry.path), "ghost", undefined, true));
     }
     actions.appendChild(toolButton("Rename", "rename", () => void this.renameSelected(), "ghost", undefined, true));
@@ -1626,11 +1632,22 @@ export class FileStation {
       | { label: string; icon?: string; danger?: boolean; disabled?: boolean; onClick: () => void }
       | "separator"
     > = [];
-    items.push({
-      label: entry.kind === "dir" ? "Open" : previewKind(entry) ? "Preview" : "Open",
-      icon: entry.kind === "dir" ? "folder" : "file",
-      onClick: () => this.openEntry(entry),
-    });
+    const openers = openersFor(this.ctx.desktop.apps(), entry);
+    // Without a preview, opening is the first app that opens the file.
+    if (entry.kind === "dir" || previewKind(entry) || openers.length === 0) {
+      items.push({
+        label: entry.kind === "dir" ? "Open" : previewKind(entry) ? "Preview" : "Open",
+        icon: entry.kind === "dir" ? "folder" : "file",
+        onClick: () => this.openEntry(entry),
+      });
+    }
+    for (const app of openers) {
+      items.push({
+        label: `Open in ${app.name}`,
+        icon: "external",
+        onClick: () => this.ctx.openApp(app.id, { path: entry.path }),
+      });
+    }
     if (entry.kind === "file") {
       items.push({ label: "Download", icon: "download", onClick: () => void this.downloadFile(entry.path) });
       items.push("separator");
@@ -1653,7 +1670,9 @@ export class FileStation {
     } else if (previewKind(entry)) {
       openPreview(this.ctx, this.lc, entry);
     } else {
-      this.ctx.toast.info("No inline preview for this file type — use Download to open it locally.");
+      const app = openersFor(this.ctx.desktop.apps(), entry)[0];
+      if (app) this.ctx.openApp(app.id, { path: entry.path });
+      else this.ctx.toast.info("No inline preview for this file type — use Download to open it locally.");
     }
   }
 

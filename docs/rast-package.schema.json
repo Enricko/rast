@@ -543,6 +543,15 @@
                   "maximum": 3000
                 }
               }
+            },
+            "opens": {
+              "description": "Files the window opens, offered in File Station's Open with: a kind (text, image, pdf) or an extension with its dot. The window is opened with the parameters {\"path\": \"<the file>\"}.",
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^(text|image|pdf|\\.[a-z0-9+_-]{1,15})$"
+              }
             }
           }
         },

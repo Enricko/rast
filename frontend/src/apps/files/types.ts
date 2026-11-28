@@ -1,6 +1,7 @@
 // Local API shapes and helpers for File Station. Shared DTOs live in core/types.
 
 import { ApiError } from "../../core/api";
+import type { AppDefinition } from "../../core/app";
 import type { FileEntry, FileListing } from "../../core/types";
 
 /** Friendly copy shown when a folder/share/file becomes inaccessible mid-session. */
@@ -133,6 +134,19 @@ export function previewKind(entry: FileEntry): PreviewKind | null {
   const ext = extension(entry.name);
   if (ext && TEXT_EXTENSIONS.includes(ext)) return "text";
   return null;
+}
+
+/**
+ * The apps (of those this account may open) whose window opens `entry`:
+ * their `opens` names its kind or its extension.
+ */
+export function openersFor(apps: AppDefinition[], entry: FileEntry): AppDefinition[] {
+  if (entry.kind !== "file") return [];
+  const kind = previewKind(entry);
+  const ext = extension(entry.name);
+  return apps.filter((app) =>
+    (app.opens ?? []).some((rule) => (rule.startsWith(".") ? ext !== "" && rule.slice(1) === ext : rule === kind)),
+  );
 }
 
 export function extension(name: string): string {

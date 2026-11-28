@@ -23,6 +23,8 @@ export interface PackageWindow {
   minSize?: { w: number; h: number } | null;
   /** The package's icon, shown wherever the app's icon is. */
   icon?: { mediaType: string; data: string } | null;
+  /** Files the window opens (File Station's "Open with"). */
+  opens?: string[] | null;
 }
 
 interface WindowModule {
@@ -69,6 +71,7 @@ export function packageAppDefinition(window: PackageWindow): AppDefinition {
     ...(window.singleton ? { singleton: true } : {}),
     ...(window.defaultSize ? { defaultSize: window.defaultSize } : {}),
     ...(window.minSize ? { minSize: window.minSize } : {}),
+    ...(window.opens?.length ? { opens: window.opens.slice() } : {}),
     packageVersion: window.version,
     async mount(ctx) {
       // The module reads the SDK as it loads: publish it first.
