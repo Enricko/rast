@@ -14,9 +14,13 @@ use crate::state::AppState;
 #[folder = "frontend/dist/"]
 struct Assets;
 
+/// The page's policy. Frames may show RAST itself and HTTPS sites (AI
+/// Agent's panel shows web pages that allow it, each in a sandboxed frame of
+/// its own origin, which reaches nothing of RAST's); scripts, styles and
+/// connections stay RAST's own.
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
 img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' blob:; \
-frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+frame-src 'self' https:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 /// Fallback handler for every non-API route: serve the asset when it exists,
 /// otherwise serve the SPA shell so client-side routes survive a refresh.

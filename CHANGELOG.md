@@ -11,7 +11,11 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Web pages in frames.** The page policy lets frames show HTTPS sites
+  (`frame-src 'self' https:`), for AI Agent's panel, which opens a linked
+  web page beside the chat when the site allows framing. Each one is a
+  sandboxed frame of the site's own origin: it reaches nothing of RAST's.
+  Scripts, styles and connections stay RAST's own.
 
 ### Fixed
 
