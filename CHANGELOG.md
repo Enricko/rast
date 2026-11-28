@@ -46,6 +46,13 @@ this file by `scripts/changelog-section.sh`.
   accounts of one provider in the AI Agent data an older RAST kept, before
   the package takes it over.
 
+### Fixed
+
+- **File Station shows PDFs in Chrome again.** Its preview put the PDF in a
+  sandboxed frame, where Chrome refuses to show PDFs (a "blocked" page
+  icon); the frame is now a plain one, and the preview's own `sandbox`
+  content security policy still keeps anything in the file from running.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless

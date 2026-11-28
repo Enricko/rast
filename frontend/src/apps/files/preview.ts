@@ -1,5 +1,6 @@
-// Safe inline previews: images via <img>, PDFs via a sandboxed iframe and text
-// via /api/files/text rendered with textContent (never innerHTML).
+// Safe inline previews: images via <img>, PDFs via an iframe of the preview
+// (served with a `sandbox` CSP) and text via /api/files/text rendered with
+// textContent (never innerHTML).
 
 import { ApiError } from "../../core/api";
 import { h } from "../../core/dom";
@@ -69,7 +70,10 @@ export function openPreview(ctx: AppContext, lifecycle: AppLifecycle, entry: Fil
     const iframe = document.createElement("iframe");
     iframe.className = "preview-pdf";
     iframe.title = `PDF preview of ${entry.name}`;
-    iframe.setAttribute("sandbox", "allow-same-origin");
+    // The preview comes with a `sandbox` CSP, a PDF type and nosniff, so
+    // nothing in it runs as this page. A `sandbox` attribute here would stop
+    // Chrome from showing the PDF at all (it blocks its viewer in sandboxed
+    // frames).
     iframe.setAttribute("referrerpolicy", "no-referrer");
     iframe.src = ctx.api.previewUrl(entry.path);
     frame.appendChild(iframe);
