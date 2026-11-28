@@ -377,6 +377,7 @@ async fn supervise(state: AppState, app: Arc<App>) {
             .env("RAST_APP_SOCKET", app.app_socket())
             .env("RAST_HOST_SOCKET", app.host_socket())
             .env("RAST_APP_TOKEN", &app.token)
+            .envs(passed_on(std::env::vars()))
             .current_dir(app.data_dir())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -486,6 +487,27 @@ async fn finish(app: &App, host: Option<tokio::task::JoinHandle<()>>) {
     });
 }
 
+/// The settings in RAST's own environment an app package gets too: the
+/// OAuth clients of its sign-ins, `RAST_<NAME>_CLIENT_ID` and
+/// `RAST_<NAME>_CLIENT_SECRET` (AI Agent's Antigravity, Gemini CLI and iFlow
+/// sign-ins, set in /etc/rast/rast.env). Nothing else of RAST's environment
+/// (its config, catalog keys, GitHub token) reaches an app.
+fn passed_on(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    vars.filter(|(name, _)| {
+        let stem = name.strip_prefix("RAST_").and_then(|rest| {
+            rest.strip_suffix("_CLIENT_ID")
+                .or_else(|| rest.strip_suffix("_CLIENT_SECRET"))
+        });
+        stem.is_some_and(|stem| {
+            !stem.is_empty()
+                && stem
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        })
+    })
+    .collect()
+}
+
 fn backoff(failures: u32) -> Duration {
     Duration::from_secs(1u64 << failures.saturating_sub(1).min(6)).min(Duration::from_secs(60))
 }
@@ -516,6 +538,39 @@ async fn terminate(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apps_get_only_the_oauth_clients_of_rasts_environment() {
+        let vars = [
+            ("RAST_ANTIGRAVITY_CLIENT_ID", "a"),
+            ("RAST_ANTIGRAVITY_CLIENT_SECRET", "b"),
+            ("RAST_GEMINI_CLI_CLIENT_SECRET", "c"),
+            ("RAST_IFLOW_CLIENT_ID", "d"),
+            ("RAST_CONFIG", "/etc/rast/rast.toml"),
+            ("RAST_PACKAGES_GITHUB_TOKEN", "ghp"),
+            ("RAST_PACKAGES_CATALOG_KEYS", "k"),
+            ("RAST_CLIENT_ID", "x"),
+            ("RAST__CLIENT_ID", "x"),
+            ("RAST_lower_CLIENT_ID", "x"),
+            ("GOOGLE_CLIENT_ID", "x"),
+            ("RAST_ANTIGRAVITY_CLIENT_ID_OLD", "x"),
+            ("HOME", "/var/lib/rast"),
+        ]
+        .map(|(n, v)| (n.to_string(), v.to_string()));
+        let names: Vec<String> = passed_on(vars.into_iter())
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "RAST_ANTIGRAVITY_CLIENT_ID",
+                "RAST_ANTIGRAVITY_CLIENT_SECRET",
+                "RAST_GEMINI_CLI_CLIENT_SECRET",
+                "RAST_IFLOW_CLIENT_ID"
+            ]
+        );
+    }
 
     #[test]
     fn restarts_slow_down_to_a_minute() {

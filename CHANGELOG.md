@@ -13,6 +13,16 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+### Fixed
+
+- **AI Agent's sign-ins get their OAuth clients again.** App packages start
+  with a cleared environment, so since AI Agent became a package its
+  Antigravity, Gemini CLI and iFlow sign-ins lost `RAST_*_CLIENT_ID` /
+  `RAST_*_CLIENT_SECRET` from `/etc/rast/rast.env`: a token refresh failed
+  with "sign-in needs its OAuth client". RAST now passes an app package
+  exactly those settings (names `RAST_<NAME>_CLIENT_ID` and
+  `RAST_<NAME>_CLIENT_SECRET`) from its own environment, nothing else.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless

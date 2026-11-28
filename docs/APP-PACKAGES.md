@@ -51,6 +51,7 @@ cleared environment and restarts (1 s up to 60 s apart) when it stops:
 | `RAST_APP_TOKEN` | this start's secret: RAST sends it as `X-Rast-Token`, the app as `Authorization: Bearer` |
 | `RAST_APP_DATA` | the app's own folder (0700), kept across updates |
 | `RAST_APP_ID`, `RAST_APP_VERSION`, `RAST_VERSION`, `RAST_HOST_API` | what runs |
+| `RAST_<NAME>_CLIENT_ID`, `RAST_<NAME>_CLIENT_SECRET` | passed on from RAST's own environment when set there (e.g. `/etc/rast/rast.env`): OAuth clients for the app's sign-ins, such as AI Agent's `RAST_ANTIGRAVITY_CLIENT_*`, `RAST_GEMINI_CLI_CLIENT_*` and `RAST_IFLOW_CLIENT_*`. Nothing else of RAST's environment reaches the app; restart `rast.service` after changing them |
 
 Requests below `apiPrefix` reach the app after RAST's sign-in, CSRF and access
 checks, without cookies or `Authorization`, with `X-Rast-Token`,
