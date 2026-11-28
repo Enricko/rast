@@ -17,7 +17,7 @@ use serde_json::json;
 use sqlx::Row;
 
 use crate::{
-    access::{self, AppRule, FolderRule, GroupRef, APP_IDS},
+    access::{self, AppRule, FolderRule, GroupRef},
     audit::{self, AuditLog},
     auth::{AdminUser, AuthUser, ClientIp},
     db,
@@ -377,7 +377,7 @@ pub(crate) fn validate_app_rules(rules: &[AppRuleInput]) -> AppResult<Vec<AppRul
     let mut merged: BTreeMap<String, String> = BTreeMap::new();
     for input in rules {
         let app_id = input.app_id.trim().to_ascii_lowercase();
-        if !APP_IDS.contains(&app_id.as_str()) {
+        if !access::is_app_id(&app_id) {
             return Err(AppError::bad_request(format!(
                 "unknown application id {:?}",
                 input.app_id
@@ -1303,7 +1303,7 @@ fn normalized_app_rules(rules: &[AppRuleDto]) -> Vec<(String, String)> {
 
 /// Helper for tests/UI: list of application ids with labels.
 pub fn app_catalog() -> Vec<serde_json::Value> {
-    APP_IDS
+    access::app_ids()
         .iter()
         .map(|id| json!({"id": id, "label": access::app_label(id)}))
         .collect()

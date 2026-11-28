@@ -156,6 +156,18 @@ const APP_ACCENT: Record<string, string> = {
   agent: "agent",
 };
 
+/** Icons App Center apps bring with their package (a data: URL by app id). */
+const PACKAGE_ICONS = new Map<string, string>();
+
+/** An App Center app's own icon (`image/svg+xml` or `image/png`, base64). */
+export function setPackageAppIcon(appId: string, icon: { mediaType: string; data: string } | null | undefined): void {
+  if (icon && (icon.mediaType === "image/svg+xml" || icon.mediaType === "image/png") && /^[A-Za-z0-9+/=]+$/.test(icon.data)) {
+    PACKAGE_ICONS.set(appId, `data:${icon.mediaType};base64,${icon.data}`);
+  } else {
+    PACKAGE_ICONS.delete(appId);
+  }
+}
+
 export function appAccentClass(appId: string): string {
   return `app-icon--${APP_ACCENT[appId] ?? "controlpanel"}`;
 }
@@ -169,6 +181,19 @@ export function appIconSvg(appId: string, fallbackIcon: string, size = 28): SVGS
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("focusable", "false");
   svg.classList.add("icon", "app-icon", appAccentClass(appId));
+  const own = APP_ICONS[appId] ? undefined : PACKAGE_ICONS.get(appId);
+  if (own) {
+    // An image inside the same svg keeps every place that sizes app icons working.
+    const image = document.createElementNS("http://www.w3.org/2000/svg", "image");
+    image.setAttribute("href", own);
+    image.setAttribute("x", "2");
+    image.setAttribute("y", "2");
+    image.setAttribute("width", "20");
+    image.setAttribute("height", "20");
+    image.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    svg.appendChild(image);
+    return svg;
+  }
   const markup = APP_ICONS[appId];
   if (!markup) {
     return iconSvg(fallbackIcon, size);

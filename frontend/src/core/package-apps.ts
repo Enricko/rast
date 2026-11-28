@@ -5,6 +5,7 @@
 
 import type { ApiClient } from "./api";
 import type { AppDefinition, AppInstance } from "./app";
+import { setPackageAppIcon } from "./icons";
 import { sdk } from "./sdk";
 
 export interface PackageWindow {
@@ -20,6 +21,8 @@ export interface PackageWindow {
   adminOnly?: boolean;
   defaultSize?: { w: number; h: number } | null;
   minSize?: { w: number; h: number } | null;
+  /** The package's icon, shown wherever the app's icon is. */
+  icon?: { mediaType: string; data: string } | null;
 }
 
 interface WindowModule {
@@ -56,6 +59,7 @@ function loadStyle(appId: string, url: string): Promise<void> {
 }
 
 export function packageAppDefinition(window: PackageWindow): AppDefinition {
+  setPackageAppIcon(window.appId, window.icon);
   return {
     id: window.appId,
     name: window.name,

@@ -335,6 +335,13 @@ fn exe_paths(base: &str, m: &Manifest) -> Vec<ExecutablePath> {
 }
 
 impl PackageManager {
+    /// The icon the accepted catalog gives a package (App Center apps show it
+    /// on the desktop).
+    pub fn catalog_icon(&self, id: &str) -> Option<manifest::PackageIcon> {
+        let guard = self.catalog.read().ok()?;
+        guard.as_ref()?.catalog.package(id)?.icon.clone()
+    }
+
     pub fn new(
         config: Arc<Config>,
         db: SqlitePool,

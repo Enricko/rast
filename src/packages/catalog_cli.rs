@@ -2115,34 +2115,44 @@ fn bun_plan_from_release(cfg: &Config, release: &Value) -> Result<Option<PlanIte
     }))
 }
 
-fn discover_ai_agent(
+/// An app package (AI Agent, Code Editor, …): its own workflow publishes
+/// releases tagged `<id>-v<version>` with one `<id>-<version>-<target>.tar.gz`
+/// per target and SHA256SUMS.
+fn discover_app(
     cfg: &Config,
+    id: &str,
     package: &PackageConfig,
     held: &BTreeSet<String>,
     token: Option<&str>,
 ) -> Result<Vec<PlanItem>, String> {
     if channel_ids(package) != ["stable".to_string()] {
-        return Err(
-            "catalog.config.json packages.ai-agent.channels must be exactly [{id: \"stable\"}]"
-                .into(),
-        );
+        return Err(format!(
+            "catalog.config.json packages.{id}.channels must be exactly [{{id: \"stable\"}}]"
+        ));
     }
     if package.app.is_none() {
-        return Err("catalog.config.json packages.ai-agent needs its app section".into());
+        return Err(format!(
+            "catalog.config.json packages.{id} needs its app section"
+        ));
     }
     let mut releases = Vec::new();
-    for repo in ai_agent_repos(package) {
+    for repo in app_repos(id, package)? {
         releases.extend(github_stable_releases(&repo, token)?);
     }
-    ai_agent_plan_from_releases(cfg, package, &releases, held)
+    app_plan_from_releases(cfg, id, package, &releases, held)
 }
 
-/// The repositories AI Agent's releases come from.
-fn ai_agent_repos(package: &PackageConfig) -> Vec<String> {
-    if package.release_repos.is_empty() {
-        vec![RAST_REPO.to_string()]
+/// The repositories an app package's releases come from (AI Agent's
+/// default: RAST's own).
+fn app_repos(id: &str, package: &PackageConfig) -> Result<Vec<String>, String> {
+    if !package.release_repos.is_empty() {
+        Ok(package.release_repos.clone())
+    } else if id == "ai-agent" {
+        Ok(vec![RAST_REPO.to_string()])
     } else {
-        package.release_repos.clone()
+        Err(format!(
+            "catalog.config.json packages.{id}.releaseRepos names no repository"
+        ))
     }
 }
 
@@ -2162,26 +2172,27 @@ fn github_repo_of(url: &str) -> Option<String> {
         .then(|| format!("{owner}/{name}"))
 }
 
-/// Pure part of the AI Agent provider: RAST's `ai-agent-v<version>` releases
-/// with one `ai-agent-<version>-<target>.tar.gz` per target and SHA256SUMS.
-fn ai_agent_plan_from_releases(
+/// Pure part of the app provider: `<id>-v<version>` releases with one
+/// `<id>-<version>-<target>.tar.gz` per target and SHA256SUMS.
+fn app_plan_from_releases(
     cfg: &Config,
+    id: &str,
     package: &PackageConfig,
     releases: &[Value],
     held: &BTreeSet<String>,
 ) -> Result<Vec<PlanItem>, String> {
     let mut found: Vec<PlanItem> = Vec::new();
     for release in releases {
-        match ai_agent_plan_from_release(cfg, package, release) {
+        match app_plan_from_release(cfg, id, package, release) {
             Ok(Some(item)) => {
                 let known = found.iter().any(|f| f.version == item.version);
-                if !known && !held.contains(&format!("ai-agent@{}", item.version)) {
+                if !known && !held.contains(&format!("{id}@{}", item.version)) {
                     found.push(item);
                 }
             }
             Ok(None) => {}
             Err(error) => log(format!(
-                "ai-agent: skipping release {}: {error}",
+                "{id}: skipping release {}: {error}",
                 release
                     .get("tag_name")
                     .and_then(Value::as_str)
@@ -2194,8 +2205,9 @@ fn ai_agent_plan_from_releases(
     Ok(found)
 }
 
-fn ai_agent_plan_from_release(
+fn app_plan_from_release(
     cfg: &Config,
+    id: &str,
     package: &PackageConfig,
     release: &Value,
 ) -> Result<Option<PlanItem>, String> {
@@ -2203,7 +2215,7 @@ fn ai_agent_plan_from_release(
         return Ok(None);
     }
     let tag = required_str(release, "tag_name")?;
-    let Some(version) = tag.strip_prefix("ai-agent-v") else {
+    let Some(version) = tag.strip_prefix(&format!("{id}-v")) else {
         return Ok(None);
     };
     match Version::parse(version) {
@@ -2224,9 +2236,9 @@ fn ai_agent_plan_from_release(
     let sums_url = required_str(sums_asset, "browser_download_url")?.to_string();
     let mut targets = BTreeMap::new();
     for target in cfg.targets.entries.iter().map(|(target, _)| target) {
-        let name = format!("ai-agent-{version}-{target}.tar.gz");
+        let name = format!("{id}-{version}-{target}.tar.gz");
         let Some(asset) = find_asset(&name) else {
-            log(format!("ai-agent {version}: release {tag} has no {name}"));
+            log(format!("{id} {version}: release {tag} has no {name}"));
             continue;
         };
         let digest = asset
@@ -2260,7 +2272,7 @@ fn ai_agent_plan_from_release(
         return Ok(None);
     }
     Ok(Some(PlanItem {
-        package: "ai-agent".into(),
+        package: id.to_string(),
         version: version.to_string(),
         channel: "stable".into(),
         kind: "upstream".into(),
@@ -3785,7 +3797,9 @@ fn cmd_discover(
             "cmake" => discover_cmake(&cfg, package, &held, token.as_deref())?,
             "gradle" => discover_gradle(&cfg, package, &held)?,
             "maven" => discover_maven(&cfg, package, &held)?,
-            "ai-agent" => discover_ai_agent(&cfg, package, &held, token.as_deref())?,
+            app if package.app.is_some() => {
+                discover_app(&cfg, app, package, &held, token.as_deref())?
+            }
             other => {
                 return Err(format!(
                     "catalog.config.json packages.{other} has no catalog provider"
@@ -4687,7 +4701,7 @@ fn verify_item(
             expected_sha256[0] = Some(expected);
             verification = "SHA-256 from the Adoptium API equals the GitHub release asset digest and the published .sha256.txt; downloaded and re-hashed in CI; java/javac/jar/jshell version checks run on the native runner".into();
         }
-        "bun" | "deno" | "ai-agent" => {
+        name if matches!(name, "bun" | "deno") || app_item(item) => {
             let url = info.sums_url.as_deref().ok_or_else(|| {
                 format!(
                     "{} {} has no checksums URL in the plan",
@@ -4713,6 +4727,8 @@ fn verify_item(
                 "SHA-256 from the release .sha256sum, equal to the GitHub asset digest; the GitHub release attestation (in-toto release predicate) is confirmed for this exact digest through the GitHub attestations API".into()
             } else if item.package == "ai-agent" {
                 "Built by RAST's ai-agent workflow; SHA-256 from the release SHA256SUMS, equal to the GitHub asset digest; build-provenance attestation verified with gh attestation verify; window files and the server's --version checked on the native runner".into()
+            } else if app_item(item) {
+                format!("Built by this repository's {} workflow; SHA-256 from the release SHA256SUMS, equal to the GitHub asset digest; build-provenance attestation verified with gh attestation verify; window files checked on the native runner", item.package)
             } else {
                 "SHA-256 from the release SHASUMS256.txt, equal to the GitHub asset digest; downloaded and re-hashed in CI".into()
             };
@@ -4928,11 +4944,17 @@ fn verify_item(
             match item.package.as_str() {
                 "python" => verify_attestation(&archive_path, PBS_REPO)?,
                 "clang" if item.attestations => verify_attestation(&archive_path, CLANG_REPO)?,
-                "ai-agent" if item.attestations => {
+                _ if app_item(item) && item.attestations => {
                     let repo =
-                        info.source.as_deref().and_then(github_repo_of).ok_or(
-                            "ai-agent: the plan does not say which repository released it",
-                        )?;
+                        info.source
+                            .as_deref()
+                            .and_then(github_repo_of)
+                            .ok_or_else(|| {
+                                format!(
+                                    "{}: the plan does not say which repository released it",
+                                    item.package
+                                )
+                            })?;
                     verify_attestation(&archive_path, &repo)?
                 }
                 "deno" if item.attestations => {
@@ -5803,8 +5825,9 @@ fn base_manifest(cfg: &Config, item: &PlanItem) -> Result<Value, String> {
             .as_deref()
             .unwrap_or(&cfg.min_rast_version)),
     );
-    if let Some(channel) =
-        channel_of(&item.package, &item.version).filter(|value| !value.is_empty())
+    if let Some(channel) = channel_of(&item.package, &item.version)
+        .or_else(|| package.app.is_some().then(|| item.channel.clone()))
+        .filter(|value| !value.is_empty())
     {
         manifest.insert("channel".into(), json!(channel));
     }
@@ -6033,6 +6056,9 @@ fn build_manifest(
                 "ai-agent" => json!({
                     "glibc": "2.35",
                     "notes": "RAST runs the server program (bin/rast-ai-agent) and opens the window (ui/) with its window SDK."
+                }),
+                _ if app.as_ref().is_some_and(|app| app.get("server").is_none()) => json!({
+                    "notes": "A window only (ui/), opened by RAST with its window SDK: there is no server program."
                 }),
                 _ => json!({}),
             };
@@ -6332,6 +6358,15 @@ fn carry_keys(plan: &Plan) -> BTreeSet<String> {
         .filter(|item| item.status == "carry")
         .map(|item| format!("{}@{}", item.package, item.version))
         .collect()
+}
+
+/// The plan item is a version of an app package (its source names the
+/// app section the verifier checks).
+fn app_item(item: &PlanItem) -> bool {
+    item.source
+        .as_ref()
+        .and_then(|source| source.get("app"))
+        .is_some_and(|app| !app.is_null())
 }
 
 fn channel_for_item(item: &PlanItem) -> String {
@@ -9394,8 +9429,8 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
             ai_agent_release("v0.9.17", "0.9.17"),
             ai_agent_release("ai-agent-v1.1.0-rc.1", "1.1.0-rc.1"),
         ];
-        let items =
-            ai_agent_plan_from_releases(&cfg, &package, &releases, &BTreeSet::new()).unwrap();
+        let items = app_plan_from_releases(&cfg, "ai-agent", &package, &releases, &BTreeSet::new())
+            .unwrap();
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(item.version, "1.0.0");
@@ -9426,11 +9461,71 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
     }
 
     #[test]
+    fn a_window_only_app_package_comes_from_its_own_releases() {
+        let mut cfg = ai_agent_config();
+        let package: PackageConfig = serde_json::from_value(json!({
+            "name": "Code Editor", "description": "Edit code", "homepage": "https://github.com/Enricko/rast-packages",
+            "license": "MIT", "keepPatches": 2, "githubAttestations": true,
+            "app": {
+                "id": "code",
+                "window": {"entry": "ui/app.js", "styles": ["ui/app.css"], "sdk": 1, "singleton": true}
+            },
+            "channels": [{"id": "stable", "label": "Code Editor", "status": "stable"}]
+        }))
+        .unwrap();
+        // Without a repository there is nowhere to look.
+        assert!(app_repos("code-editor", &package)
+            .unwrap_err()
+            .contains("packages.code-editor.releaseRepos"));
+        let mut package = package;
+        package.release_repos = vec!["Enricko/rast-packages".into()];
+        cfg.packages
+            .entries
+            .push(("code-editor".into(), package.clone()));
+        let release = |tag: &str, version: &str| {
+            let text = ai_agent_release(tag, version)
+                .to_string()
+                .replace("ai-agent-", "code-editor-");
+            serde_json::from_str::<Value>(&text).unwrap()
+        };
+        let releases = [
+            release("code-editor-v1.0.0", "1.0.0"),
+            // Another package's release in the same repository.
+            ai_agent_release("ai-agent-v1.7.0", "1.7.0"),
+        ];
+        let items =
+            app_plan_from_releases(&cfg, "code-editor", &package, &releases, &BTreeSet::new())
+                .unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(
+            (item.package.as_str(), item.version.as_str()),
+            ("code-editor", "1.0.0")
+        );
+        assert!(app_item(item));
+        assert_eq!(
+            item.targets["linux-aarch64"].file.as_deref(),
+            Some("code-editor-1.0.0-linux-aarch64.tar.gz")
+        );
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["type"], "app");
+        assert_eq!(manifest["channel"], "stable");
+        assert!(manifest["app"].get("server").is_none());
+        assert!(manifest["artifacts"][0]["requires"]["notes"]
+            .as_str()
+            .unwrap()
+            .contains("no server program"));
+        let parsed = manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        manifest::validate(&parsed).unwrap();
+    }
+
+    #[test]
     fn ai_agent_releases_come_from_its_repositories_newest_home_first() {
         let mut cfg = ai_agent_config();
         // Older catalogs' config: RAST's repository.
         let package = package_config(&cfg, "ai-agent").unwrap().clone();
-        assert_eq!(ai_agent_repos(&package), ["Enricko/rast"]);
+        assert_eq!(app_repos("ai-agent", &package).unwrap(), ["Enricko/rast"]);
         let entry = cfg
             .packages
             .entries
@@ -9440,7 +9535,7 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
         entry.1.release_repos = vec!["Enricko/rast-packages".into(), "Enricko/rast".into()];
         let package = package_config(&cfg, "ai-agent").unwrap().clone();
         assert_eq!(
-            ai_agent_repos(&package),
+            app_repos("ai-agent", &package).unwrap(),
             ["Enricko/rast-packages", "Enricko/rast"]
         );
         let moved = |tag: &str, version: &str| {
@@ -9456,8 +9551,8 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
             ai_agent_release("ai-agent-v1.3.0", "1.3.0"),
             ai_agent_release("ai-agent-v1.2.0", "1.2.0"),
         ];
-        let items =
-            ai_agent_plan_from_releases(&cfg, &package, &releases, &BTreeSet::new()).unwrap();
+        let items = app_plan_from_releases(&cfg, "ai-agent", &package, &releases, &BTreeSet::new())
+            .unwrap();
         let versions: Vec<&str> = items.iter().map(|i| i.version.as_str()).collect();
         assert_eq!(versions, ["1.4.0", "1.3.0"]);
         let source = items[1].targets["linux-x86_64"].source.as_deref().unwrap();

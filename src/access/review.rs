@@ -13,7 +13,7 @@ use sqlx::{Row, SqlitePool};
 
 use super::{
     app_access, app_label, folder_access_by_id, group_refs_for_user, AppAccessDto, EffectiveUser,
-    GroupRef, RuleSource, APP_IDS,
+    GroupRef, RuleSource,
 };
 use crate::{auth::AuthUser, error::AppResult, storage::Perm};
 
@@ -219,8 +219,9 @@ pub async fn effective_access_page(
         });
     }
 
-    let mut apps = Vec::with_capacity(APP_IDS.len());
-    for app_id in APP_IDS {
+    let ids = super::app_ids();
+    let mut apps = Vec::with_capacity(ids.len());
+    for app_id in &ids {
         let access = app_access(pool, user, app_id).await?;
         apps.push(AppAccessDto {
             app_id: access.app_id,
@@ -486,12 +487,16 @@ pub async fn group_deletion_impact(pool: &SqlitePool, group_id: i64) -> AppResul
     .bind(group_id)
     .fetch_all(pool)
     .await?;
-    let app_targets: Vec<String> = sqlx::query_scalar(
+    let app_targets: Vec<String> = sqlx::query_scalar::<_, String>(
         "SELECT app_id FROM group_app_rules WHERE group_id = ? AND rule <> 'inherit' ORDER BY app_id",
     )
     .bind(group_id)
     .fetch_all(pool)
-    .await?;
+    .await?
+    .into_iter()
+    // A rule for a package app that is no longer installed changes nothing.
+    .filter(|id| super::is_app_id(id))
+    .collect();
 
     let before = snapshot(pool, &accounts, &folder_targets, &app_targets).await?;
 

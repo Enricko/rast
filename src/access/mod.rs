@@ -69,9 +69,78 @@ async fn app_list_setting(pool: &SqlitePool, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// An installed App Center app with a window (other than AI Agent, which
+/// the policy knows as `agent`): its access rules work like a built-in
+/// app's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageApp {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// It has no server program: its window does only what the person could
+    /// do with RAST's own API, so every account may open it unless a rule
+    /// says otherwise. Apps with a server program need an administrator's
+    /// grant.
+    pub window_only: bool,
+}
+
+fn package_apps() -> &'static RwLock<Vec<PackageApp>> {
+    static APPS: OnceLock<RwLock<Vec<PackageApp>>> = OnceLock::new();
+    APPS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// The installed package apps (the app host calls this whenever they change).
+pub fn set_package_apps(mut apps: Vec<PackageApp>) {
+    apps.retain(|app| !APP_IDS.contains(&app.id.as_str()) && app.id != LAUNCHER_APP);
+    apps.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then(a.id.cmp(&b.id))
+    });
+    apps.dedup_by(|a, b| a.id == b.id);
+    let mut current = package_apps().write().unwrap_or_else(|e| e.into_inner());
+    if *current != apps {
+        *current = apps;
+        drop(current);
+        bump_generation();
+    }
+}
+
+/// An installed package app by id.
+pub fn package_app(app_id: &str) -> Option<PackageApp> {
+    package_apps()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|app| app.id == app_id)
+        .cloned()
+}
+
+/// Whether the policy knows this application (built in or installed).
+pub fn is_app_id(app_id: &str) -> bool {
+    APP_IDS.contains(&app_id) || package_app(app_id).is_some()
+}
+
+/// Every application the policy offers: the built-in ones, then the
+/// installed package apps by name.
+pub fn app_ids() -> Vec<String> {
+    APP_IDS
+        .iter()
+        .map(|id| (*id).to_string())
+        .chain(
+            package_apps()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|app| app.id.clone()),
+        )
+        .collect()
+}
+
 /// Ids that may be pinned to the taskbar or placed on the desktop.
 pub fn is_desktop_app(app_id: &str) -> bool {
-    app_id == LAUNCHER_APP || APP_IDS.contains(&app_id)
+    app_id == LAUNCHER_APP || is_app_id(app_id)
 }
 
 /// Removable apps that are not installed: uninstalled ones, and optional
@@ -134,8 +203,8 @@ pub async fn set_app_installed(
     Ok(true)
 }
 
-pub fn app_label(app_id: &str) -> &'static str {
-    match app_id {
+pub fn app_label(app_id: &str) -> String {
+    let label = match app_id {
         "files" => "File Station",
         "applications" => "Docker",
         "launcher" => "Applications",
@@ -146,13 +215,18 @@ pub fn app_label(app_id: &str) -> &'static str {
         "controlpanel" => "Control Panel",
         "terminal" => "Terminal",
         "agent" => "AI Agent",
-        _ => "Unknown application",
-    }
+        _ => {
+            return package_app(app_id)
+                .map(|app| app.name)
+                .unwrap_or_else(|| "Unknown application".into())
+        }
+    };
+    label.to_string()
 }
 
 /// One line about an application (App Center's app pages).
-pub fn app_description(app_id: &str) -> &'static str {
-    match app_id {
+pub fn app_description(app_id: &str) -> String {
+    let description = match app_id {
         "files" => "Browse, upload, download and organise your files.",
         "applications" => "Deploy and manage Docker containers and Compose apps.",
         "launcher" => "Every app you can open, in one folder.",
@@ -167,13 +241,19 @@ pub fn app_description(app_id: &str) -> &'static str {
         "agent" => {
             "Chat with AI agents on the models your administrator sets up: Claude, GPT, DeepSeek, OpenRouter, local models and more."
         }
-        _ => "",
-    }
+        _ => {
+            return package_app(app_id)
+                .map(|app| app.description)
+                .unwrap_or_default()
+        }
+    };
+    description.to_string()
 }
 
 /// Applications allowed to every authenticated user by default.
 fn app_default_allowed(app_id: &str) -> bool {
     matches!(app_id, "files" | "monitor" | "logs" | "controlpanel")
+        || package_app(app_id).is_some_and(|app| app.window_only)
 }
 
 fn app_default_read_only(_app_id: &str) -> bool {
@@ -186,7 +266,7 @@ fn app_default_read_only(_app_id: &str) -> bool {
 /// administrator-only); members granted Terminal get shells in their own
 /// sandbox container (`crate::sandbox`), never on the server itself.
 fn app_grant_manages(app_id: &str) -> bool {
-    matches!(app_id, "packages" | "terminal" | "agent")
+    matches!(app_id, "packages" | "terminal" | "agent") || package_app(app_id).is_some()
 }
 
 /// Whether an explicit group allow is read-only for this application.
@@ -594,7 +674,7 @@ async fn compute_folder(
 
 /// Evaluate application access for one account.
 pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> AppResult<AppAccess> {
-    if !APP_IDS.contains(&app_id) {
+    if !is_app_id(app_id) {
         return Err(AppError::bad_request(format!(
             "unknown application {app_id:?}"
         )));
@@ -861,12 +941,13 @@ pub async fn effective_access(
         });
     }
 
-    let mut apps = Vec::with_capacity(APP_IDS.len());
-    for app_id in APP_IDS {
+    let ids = app_ids();
+    let mut apps = Vec::with_capacity(ids.len());
+    for app_id in &ids {
         let access = app_access(pool, user, app_id).await?;
         apps.push(AppAccessDto {
             app_id: access.app_id,
-            label: app_label(app_id).to_string(),
+            label: app_label(app_id),
             allowed: access.allowed,
             read_only: access.read_only,
             sources: access.sources,
@@ -1221,6 +1302,38 @@ mod tests {
             Some("logs")
         );
         assert_eq!(event_app("access.changed", &serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn installed_package_apps_join_the_policy() {
+        let app = |id: &str, name: &str, window_only: bool| PackageApp {
+            id: id.into(),
+            name: name.into(),
+            description: format!("{name} does things"),
+            window_only,
+        };
+        set_package_apps(vec![
+            app("zz-server-app", "Zeta", false),
+            app("zz-window-app", "Alpha", true),
+            // AI Agent keeps its built-in rules.
+            app("agent", "AI Agent", false),
+        ]);
+        assert!(is_app_id("zz-window-app") && is_app_id("zz-server-app"));
+        assert!(is_desktop_app("zz-window-app"));
+        let ids = app_ids();
+        assert_eq!(&ids[..APP_IDS.len()], APP_IDS);
+        assert_eq!(&ids[APP_IDS.len()..], ["zz-window-app", "zz-server-app"]);
+        assert_eq!(app_label("zz-window-app"), "Alpha");
+        assert_eq!(app_description("zz-server-app"), "Zeta does things");
+        assert_eq!(app_label("agent"), "AI Agent");
+        // A window does only what the person could do anyway: open to all.
+        assert!(app_default_allowed("zz-window-app"));
+        // A server program needs a grant, and a grant is a full one.
+        assert!(!app_default_allowed("zz-server-app"));
+        assert!(!app_grant_read_only("zz-server-app"));
+        set_package_apps(Vec::new());
+        assert!(!is_app_id("zz-window-app"));
+        assert_eq!(app_label("zz-window-app"), "Unknown application");
     }
 
     #[test]

@@ -221,6 +221,18 @@ impl AppHost {
                 starting.push(app);
             }
         }
+        // Access rules, the desktop and pinning know the apps that are there now.
+        crate::access::set_package_apps(
+            self.list()
+                .iter()
+                .map(|app| crate::access::PackageApp {
+                    id: app.app_id.clone(),
+                    name: app.name.clone(),
+                    description: app.description.clone(),
+                    window_only: app.spec.server.is_none(),
+                })
+                .collect(),
+        );
         for app in stopping {
             tracing::info!(app = %app.app_id, version = %app.version, "stopping app");
             let _ = app.stop.send(true);
@@ -310,7 +322,11 @@ async fn installed_apps(state: &AppState) -> crate::error::AppResult<Vec<Install
             package_id: package.id.clone(),
             name: row.manifest.name.clone(),
             description: row.manifest.description.clone(),
-            icon: row.manifest.icon.clone(),
+            icon: row
+                .manifest
+                .icon
+                .clone()
+                .or_else(|| state.packages.catalog_icon(&package.id)),
             version: row.version.clone(),
             revision: row.revision,
             root: PathBuf::from(&row.install_path),

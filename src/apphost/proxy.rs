@@ -230,7 +230,7 @@ async fn may_open(state: &AppState, user: &AuthUser, app: &App) -> AppResult<boo
     if app.spec.window.admin_only && !user.is_admin() {
         return Ok(false);
     }
-    if !access::APP_IDS.contains(&app.app_id.as_str()) {
+    if !access::is_app_id(&app.app_id) {
         // An app RAST has no access rules for: administrators only.
         return Ok(user.is_admin());
     }

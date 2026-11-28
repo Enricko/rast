@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use crate::{
-    access::{self, app_label, APP_IDS},
+    access::{self, app_label},
     audit::{self, AuditLog},
     auth::{self, csrf, password, session, AuthUser, PeerAddr, Role},
     db,
@@ -331,14 +331,14 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
             .await?
             .unwrap_or_else(|| db::now_ms() + state.config.session_ttl_hours * 3_600_000);
     let mut apps = BTreeMap::new();
-    for app_id in APP_IDS {
-        let grant = access::app_access(&state.db, &user, app_id).await?;
+    for app_id in access::app_ids() {
+        let grant = access::app_access(&state.db, &user, &app_id).await?;
         apps.insert(
-            (*app_id).to_string(),
+            app_id.clone(),
             AppPermissionDto {
                 allowed: grant.allowed,
                 read_only: grant.read_only,
-                label: app_label(app_id).to_string(),
+                label: app_label(&app_id),
                 installed: grant.fallback != "not-installed",
             },
         );
